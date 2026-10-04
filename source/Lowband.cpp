@@ -133,7 +133,7 @@ Lowband::Lowband()
 	params[ PT_DROPOUTS ]   = 0.15f;
 	params[ PT_DECK ]       = static_cast< float >( model::kVideo8 );
 	params[ PT_STANDARD ]   = static_cast< float >( model::kPAL );
-	params[ PT_HEAD_CLOG ]  = 0.4f;//0.06 um: 4 to 9 dB off the carriers between Video8's tip and Hi8's white clip
+	params[ PT_HEAD_CLOG ]  = 0.4f;//0.06 um: 4.4 dB off Video8's sync tip, 8.0 dB off Hi8's peak white (PAL)
 	params[ PT_SYNC_AGC ]   = 0.0f;
 	params[ PT_MIX ]        = 1.0f;
 
