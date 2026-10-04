@@ -128,11 +128,12 @@ Lowband::Lowband()
 	// GetFloatParameter.
 	//---------------------------------------------------------------------
 	params[ PT_RECORDING ]  = static_cast< float >( model::kHi8 );
-	params[ PT_TAPE_NOISE ] = controls::CnrParam( 28.0 );
+	params[ PT_TAPE_NOISE ] = 0.6f;//24.4 dB: Hi8's highlights break up, its darks and a Video8 tape stay clean
+
 	params[ PT_DROPOUTS ]   = 0.15f;
 	params[ PT_DECK ]       = static_cast< float >( model::kVideo8 );
 	params[ PT_STANDARD ]   = static_cast< float >( model::kPAL );
-	params[ PT_HEAD_CLOG ]  = controls::ClogParam( 0.03e-6 );
+	params[ PT_HEAD_CLOG ]  = 0.4f;//0.06 um: 4 to 9 dB off the carriers between Video8's tip and Hi8's white clip
 	params[ PT_SYNC_AGC ]   = 0.0f;
 	params[ PT_MIX ]        = 1.0f;
 

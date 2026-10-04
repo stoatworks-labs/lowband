@@ -1581,26 +1581,40 @@ int runDisplay( int W, int H, int perturb, bool quiet )
 					const double i0 = std::floor( sx ), t = sx - i0;
 					const double t2 = t * t, t3 = t2 * t;
 					const double wt[ 4 ] = { 0.5 * ( -t3 + 2.0 * t2 - t ), 0.5 * ( 3.0 * t3 - 5.0 * t2 + 2.0 ), 0.5 * ( -3.0 * t3 + 4.0 * t2 + t ), 0.5 * ( t3 - t2 ) };
-					double yuv[ 3 ] = {};
+					//The weights' derivatives in t, for the bound below.
+					const double dw[ 4 ] = { 0.5 * ( -3.0 * t2 + 4.0 * t - 1.0 ), 0.5 * ( 9.0 * t2 - 10.0 * t ), 0.5 * ( -9.0 * t2 + 8.0 * t + 1.0 ), 0.5 * ( 3.0 * t2 - 2.0 * t ) };
+					double yuv[ 3 ] = {}, slope[ 3 ] = {};
 					for( int q = 0; q < 4; ++q )
 					{
 						const int i = std::clamp( static_cast< int >( i0 ) - 1 + q, 0, P - 1 );
 						for( int c = 0; c < 3; ++c )
-							yuv[ c ] += wt[ q ] * deck[ ( static_cast< size_t >( l ) * P + i ) * 4 + c ];
+						{
+							const double v = deck[ ( static_cast< size_t >( l ) * P + i ) * 4 + c ];
+							yuv[ c ] += wt[ q ] * v;
+							slope[ c ] += dw[ q ] * v;
+						}
 					}
+					//The shader's sample position is a float: ( x + 1/2 ) P is exact
+					//and the subtraction is, but GLSL 4.10 (s4.7.1) lets a division
+					//be 2.5 ulp out: for a position near 700, 1.5e-4 of a pixel. It
+					//moves each channel by its spline's slope there, and the matrix
+					//carries U to B by 1 / 0.492 and V to R by 1 / 0.877. Plus 2e-6
+					//for the float weights and matrix (correctly rounded products of
+					//values under 2), and 1 % on the slope for the neighbourhood the
+					//rounded position may stand in.
+					const double posErr = 2.5 * std::ldexp( 1.0, std::ilogb( sx + 0.5 ) - 23 );
+					const double bound  = posErr * 1.01 * ( std::fabs( slope[ 0 ] ) + std::fabs( slope[ 1 ] ) / 0.492111 + std::fabs( slope[ 2 ] ) / 0.877283 ) + 2e-6;
 					float rgb[ 3 ];
 					yuvToRgb( yuv[ 0 ], yuv[ 1 ], yuv[ 2 ], rgb );
 					for( int c = 0; c < 3; ++c )
 					{
 						const double want = std::clamp( static_cast< double >( rgb[ c ] ), 0.0, 1.0 );
 						clamped += want != rgb[ c ];
-						worst = std::max( worst, std::fabs( want - out[ ( static_cast< size_t >( r ) * w + x ) * 4 + c ] ) );
+						worst = std::max( worst, std::fabs( want - out[ ( static_cast< size_t >( r ) * w + x ) * 4 + c ] ) / bound );
 					}
 				}
 			}
-			//Float arithmetic in the shader against double here: the weights and
-			//the matrix, a few ulps of values under 2.
-			failures += report( worst <= 1e-5, quiet, "%s at %dx%d: every host pixel is the deck's picture read back (%.2g off at most; %ld values clamped)", ms.name, w, h, worst, clamped );
+			failures += report( worst <= 1.0, quiet, "%s at %dx%d: every host pixel is the deck's picture read back (at most %.2f of its float bound; %ld values clamped)", ms.name, w, h, worst, clamped );
 			s.end();
 		}
 	}
