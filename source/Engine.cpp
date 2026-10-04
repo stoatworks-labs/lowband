@@ -32,12 +32,12 @@ int samples( double us )
 
 /// The composite luma of one line over its own samples [ from, to ), with
 /// 0 <= from <= to <= L and k = 0 its sync's leading edge, in volts, into
-/// dst[ ( k - from ) * 4 ]: sync, blanking, and the picture interpolated
+/// dst[ ( k - from ) * stride ]: sync, blanking, and the picture interpolated
 /// linearly between pixel centres at activeStart + 3 i + 1 (held flat over
 /// the first pixel's left third and the last's right third). `pix` is the
 /// line's Y' (stride 4), or null for a line with no picture (the vertical
 /// interval).
-void composite( const float* pix, int pixels, int syncN, int a0, float S, float Wh, int from, int to, float* dst )
+void composite( const float* pix, int pixels, int syncN, int a0, float S, float Wh, int from, int to, float* dst, int stride )
 {
 	auto level = [ & ]( int i ) {
 		return Wh * std::clamp( pix[ 4 * std::clamp( i, 0, pixels - 1 ) ], 0.0f, 1.0f );
@@ -53,7 +53,7 @@ void composite( const float* pix, int pixels, int syncN, int a0, float S, float 
 			const float y0 = level( i0 ), y1 = level( i0 + 1 );
 			v              = y0 + t * ( y1 - y0 );
 		}
-		dst[ static_cast< ptrdiff_t >( k - from ) * 4 ] = v;
+		dst[ static_cast< ptrdiff_t >( k - from ) * stride ] = v;
 	}
 }
 
@@ -166,9 +166,9 @@ void Engine::recordBatch( const float* const* pix, const float* const* prev, int
 	//--- and the start of the next line's sync.
 	for( int k = 0; k < L4; ++k )
 	{
-		composite( prev[ k ], pixels, syncN, a0, S, Wh, L - warm, L, a + k );
-		composite( pix[ k ], pixels, syncN, a0, S, Wh, 0, L, a + k + static_cast< ptrdiff_t >( warm ) * L4 );
-		composite( nullptr, pixels, syncN, a0, S, Wh, 0, total - warm - L, a + k + static_cast< ptrdiff_t >( warm + L ) * L4 );
+		composite( prev[ k ], pixels, syncN, a0, S, Wh, L - warm, L, a + k, L4 );
+		composite( pix[ k ], pixels, syncN, a0, S, Wh, 0, L, a + k + static_cast< ptrdiff_t >( warm ) * L4, L4 );
+		composite( nullptr, pixels, syncN, a0, S, Wh, 0, total - warm - L, a + k + static_cast< ptrdiff_t >( warm + L ) * L4, L4 );
 	}
 
 	//--- record: Y low-pass, pre-emphasis, clips, FM.
@@ -302,27 +302,78 @@ void Engine::runBatch( const float* in, int lines, int pixels, const EngineSetti
 	//--- the deck: RF band, limiter, pulse count.
 	std::fill( state, state + 256, 0.0f );
 	chain.rf.RunLanes( b, total, state );
-	//A unit of area at each crossing, shared between the samples either side
-	//in proportion: its centroid is the crossing's time. The crossing in
-	//( i - 1, i ] puts t on sample i (kept in `a`) and 1 - t on sample i - 1.
+	//A unit of area at each crossing, spread over the four samples about it
+	//by a cubic B-spline centred on the crossing's time. A pulse train sampled
+	//at 40.5 MHz aliases: the 4th harmonic of white's 10.8 MHz crossing rate
+	//lands at 2.7 MHz, in the picture. Splitting each pulse between the two
+	//samples either side (a linear kernel, sinc^2) left a 2 % ripple on a
+	//matched deck's white; the B-spline's sinc^4 takes it below 0.1 %.
+	//
+	//Pass 1 stores, for the interval ( i - 1, i ], the crossing's offset u
+	//past sample i - 1 (or -1 for none) in `a`; pass 2 gathers each sample's
+	//share from the four intervals that reach it.
 	sc.pulses.assign( static_cast< size_t >( total ) * L4, 0.0f );
 	float* LB_RESTRICT pulses = sc.pulses.data();
 	{
-		float* LB_RESTRICT late        = a;
-		const float* LB_RESTRICT x     = b;
-		const size_t n                 = static_cast< size_t >( total ) * L4;
+		float* LB_RESTRICT offset  = a;
+		const float* LB_RESTRICT x = b;
+		const size_t n             = static_cast< size_t >( total ) * L4;
 		for( size_t i = 0; i < static_cast< size_t >( L4 ); ++i )
-			late[ i ] = 0.0f;
+			offset[ i ] = -1.0f;
+		//The crossing's time: the linear estimate, refined by two Newton steps
+		//on the cubic through the four samples about it. A linear estimate on
+		//a carrier 7.5 samples a cycle (Video8's white) is up to 1 % of a
+		//sample out, in a pattern that repeats every four crossings: a
+		//2.7 MHz ripple on a flat field. The cubic takes it to 0.01 %.
 		for( size_t i = L4; i < n; ++i )
 		{
 			const float x0   = x[ i - L4 ], x1 = x[ i ];
 			const bool cross = ( x0 < 0.0f ) != ( x1 < 0.0f );
-			const float t    = cross ? x0 / ( x0 - x1 ) : 0.0f;
-			late[ i ]        = t;
-			pulses[ i - L4 ] = cross ? 1.0f - t : 0.0f;
+			float u          = cross ? x0 / ( x0 - x1 ) : -1.0f;
+			if( cross && i >= 2 * static_cast< size_t >( L4 ) && i + L4 < n )
+			{
+				const float xm = x[ i - 2 * L4 ], xp = x[ i + L4 ];
+				//Lagrange through ( -1, xm ), ( 0, x0 ), ( 1, x1 ), ( 2, xp ),
+				//as c0 + c1 u + c2 u^2 + c3 u^3.
+				const float c0 = x0;
+				const float c1 = -xm / 3.0f - x0 / 2.0f + x1 - xp / 6.0f;
+				const float c2 = xm / 2.0f - x0 + x1 / 2.0f;
+				const float c3 = -xm / 6.0f + x0 / 2.0f - x1 / 2.0f + xp / 6.0f;
+				for( int step = 0; step < 2; ++step )
+				{
+					const float p  = c0 + u * ( c1 + u * ( c2 + u * c3 ) );
+					const float dp = c1 + u * ( 2.0f * c2 + u * 3.0f * c3 );
+					u              = dp != 0.0f ? u - p / dp : u;
+				}
+				u = std::min( std::max( u, 0.0f ), 0.99999994f );
+			}
+			offset[ i ] = u;
 		}
-		for( size_t i = 0; i < n; ++i )
-			pulses[ i ] += late[ i ];
+		//The interval ( i - 1, i ] with offset u reaches samples i - 2 .. i + 1
+		//with the B-spline's weights ( 1 - u )^3 / 6, ( 3u^3 - 6u^2 + 4 ) / 6,
+		//( -3u^3 + 3u^2 + 3u + 1 ) / 6, u^3 / 6: sample m takes w0 from
+		//interval m + 2, w1 from m + 1, w2 from m and w3 from m - 1.
+		auto weight = []( float u, int which ) {
+			if( u < 0.0f )
+				return 0.0f;
+			const float u2 = u * u, u3 = u2 * u, v = 1.0f - u;
+			switch( which )
+			{
+			case 0: return v * v * v * ( 1.0f / 6.0f );
+			case 1: return ( 3.0f * u3 - 6.0f * u2 + 4.0f ) * ( 1.0f / 6.0f );
+			case 2: return ( -3.0f * u3 + 3.0f * u2 + 3.0f * u + 1.0f ) * ( 1.0f / 6.0f );
+			default: return u3 * ( 1.0f / 6.0f );
+			}
+		};
+		const ptrdiff_t T = static_cast< ptrdiff_t >( total );
+		for( ptrdiff_t m = 0; m < T; ++m )
+			for( int k = 0; k < L4; ++k )
+			{
+				auto at = [ & ]( ptrdiff_t i ) {
+					return ( i >= 0 && i < T ) ? offset[ static_cast< size_t >( i ) * L4 + k ] : -1.0f;
+				};
+				pulses[ static_cast< size_t >( m ) * L4 + k ] = weight( at( m + 2 ), 0 ) + weight( at( m + 1 ), 1 ) + weight( at( m ), 2 ) + weight( at( m - 1 ), 3 );
+			}
 	}
 
 	//--- the demodulator's low-pass and the de-emphasis, then the deck's map.
