@@ -232,6 +232,26 @@ that floor. Software rendering says nothing about a GPU, or about speed.
 - Seen only on Resolume's bundled demo clips, never on camera footage.
 - No OpenFX port and no presets.
 
+## Browser demo
+
+[lowband-demo.stoatworks-labs.com](https://lowband-demo.stoatworks-labs.com/) runs the
+plugin's own intake and display shaders in WebGL2, spliced in from `source/Shaders.cpp` by
+`demo/tools/sync_shaders.py` and checked by `demo/tools/check_shaders.py` from
+`tools/verify.sh` against what `lbtest --dump-shaders` says the plugin compiles, over the
+same RGBA32F rasters. Between them, the CPU engine — the FM recording, the tape and the
+Video8 deck's demodulator at 40.5 MHz — is a hand port to JavaScript (`demo/engine.js`,
+`dsp.js`, `model.js`) running in Web Workers, and the page says so: it shows the last frame
+the workers finished, about 30 frames of tape a second on an M4 Max against the plugin's
+every frame. `demo/tools/check_port.sh` (also run by verify) compiles the plugin's own
+constructor, `ProcessOpenGL` and engine with GL replaced by a recorder and finds the port's
+38.9 million uploaded floats over ten scenarios bit-identical to the C++ as written and to
+the Intel slice; the Apple-silicon slice fuses multiply-adds, and 450 of them then differ by
+more than 1/255, all under tape noise, at the demodulator's threshold, where one rounding can
+add or lose a zero crossing. Driven frame by frame
+against `lbtest --pipe --fps 60` on the same input, every pixel agrees to 1/255. Generated
+clips only, or your own image or video, which never leaves the page. No sound: the plugin
+has none.
+
 ## Build
 
 Needs CMake 3.15+, a C++17 compiler and the FFGL SDK submodule.

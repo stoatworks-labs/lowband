@@ -307,6 +307,116 @@ MSVC may not, and then the engine could be several times slower. An SSE path for
 
 ---
 
+## Browser demo
+
+`demo/` is the page at **lowband-demo.stoatworks-labs.com** (2026-10-04), on the fleet's kit
+(`stoatworks-backend/resolume-demo`, vendored by its `sync.sh lowband`; never edit
+`demo/vendor/`).
+
+**What is the plugin's.** The version line, `kCommon` and the vertex, intake and display
+bodies of `Shaders.cpp` are spliced into `demo/plugin.js` by `demo/tools/sync_shaders.py`,
+tabs and comments included; `assemble` and the list of stages that take `kCommon` are
+Shaders.cpp's. `demo/tools/check_shaders.py --dump DIR` compares every assembled stage with
+`lbtest --dump-shaders DIR` byte for byte; `tools/verify.sh` runs it. The kit's `port()`
+changes only the version line and the precision qualifiers. The buffers are the plugin's:
+the intake P × N RGBA32F read back in floats, the deck's picture uploaded as the same; the
+page refuses to start without `EXT_color_buffer_float`.
+
+**What is a hand port.** Model.cpp, Controls.cpp and Clock.cpp (with the unit declared) in
+`demo/model.js`, with the constructor's parameters (`DECLARATIONS`), the head of
+`ProcessOpenGL` (`Instance.beginFrame`: the settings, the raster, the clock, the video frame)
+and its two passes (`passes()`); Dsp.cpp in `demo/dsp.js`; Engine.cpp in `demo/engine.js`.
+The plugin runs eight lines in lock step, one a SIMD lane; no lane reads another and a line's
+seed is its row, so the port runs one line at a time with the same arithmetic. Every C++
+`float` operation is one `Math.fround`, in the C++'s order (by Figueroa, double rounding is
+innocuous for + − × ÷ when the wider type has 2p + 2 bits, so a float operation computed in
+double and rounded IS the float operation); doubles stay doubles. The page splits each
+frame's lines across Web Workers (`demo/engine-worker.js`, as many as the plugin's
+`defaultThreads()`), does the clamp and the AGC on the main thread in line order, and shows
+the last finished frame with the input it was made from; paused, a new frame starts only
+when the clock, a parameter, the clip or the size changed. About 0.25 s of one core a
+frame in node, 24–35 ms on eight workers on an M4 Max: some 30 frames of tape a second.
+
+**`demo/tools/check_port.sh` checks the port against the C++, not a reader.** It cuts the
+`ParamID` enum out of Lowband.h and the anonymous namespace, the whole constructor and the
+whole of `ProcessOpenGL` out of Lowband.cpp at run time, pastes them unedited into
+`demo/tools/refport.cpp`'s scaffolding (GL entry points and `ffglex` classes that RECORD
+every uniform, texture and framebuffer, and a `glReadPixels` that hands the plugin an intake
+the script wrote), compiles that with the plugin's own Engine, Model, Dsp, Controls and Clock,
+and compares: the declarations and groups; every filter's float coefficients and steady
+states, the rasters, the clog taps, sigma, the dropouts and line seeds; all 65,536 Gaussian
+table entries; and over 10 scenarios and 25 frames (the defaults at 1280×720, matched decks,
+NTSC with a full clog, Sync AGC and Mix, a Video8 tape on a Hi8 deck at 30 dropouts a
+frame, out-of-range intakes, fractional options, the clock's backward jump, gap and stall,
+a 7×3 host) the clock, the video frame, the settings, the sync depth, gain and porch, both
+passes and **every one of 38,877,696 uploaded floats: bit-identical** at `-ffp-contract=off`,
+and identical to the x86_64 slice (`-O3 -arch x86_64` under Rosetta). The same frame split
+1, 3, 5 or 7 ways is the same picture. ~14 s. Mutations of the port caught (scratch copies):
+a B-spline weight 4 → 5, one Newton step instead of two, the deck de-emphasising with the
+tape's tau, 23 clog half-taps, the Gaussian table at i + 0.49, the noise seed's salt, Tape
+Noise's 46 dB top to 45, Dropouts in the Deck group, Head Clog's default 0.41, the porch
+window from 1.1 µs, one lost `fround` in the FM phase, the chroma's backward pass dropped,
+the display's `MixAmount` renamed, the clock's jump 1/50 s. Not caught, and said: the AGC's
+floor (5 % of the sync), which no reachable setting makes bind.
+
+**What is not bit-identical, and why.**
+- **The arm64 slice fuses multiply-adds** (clang's default `-ffp-contract=on` at `-O3`);
+  JavaScript cannot. Against it 22.9 M of the 38.9 M floats differ in their last bits and
+  450 by more than 1/255 (at most 2.6), every one of them in a scenario with tape noise and
+  picture detail: the demodulator at its threshold, where one rounding can add or lose a
+  zero crossing (a reading, not traced sample by sample). With no noise the largest
+  difference is 6e-6. The plugin's own two slices differ from each other the same way.
+- **libm is not JavaScript's Math.** `tan`, `sin`, `cos`, `exp`, `log`, `pow` differ in the
+  last bit here and there (neither is correctly rounded: Apple's `cos(0.77)` and V8's
+  `cos(0.1)` are each one ulp off), so the filter designs' doubles differ in their last bits;
+  every float coefficient is identical. Group delays (only the deck's delay compensation
+  uses them) differ by up to 5 ulp at DC and the blanking carriers, the compensated delay by
+  2 ulp, the dropouts' ends by 1 ulp: compared in ulps and reported, never reaching a float
+  or a sample in the scenarios. `erfc`, which JavaScript lacks, is the page's own (a series
+  below 1, Lentz's continued fraction above); the table it feeds is identical.
+- **`__divdc3` fuses too.** `std::complex` division goes to compiler-rt's `__divdc3`, whose
+  arm64 build has three `fmadd`s whatever the plugin's own flags (found in its disassembly
+  when the group delays disagreed by an ulp); `dsp.js` ports them with an exact BigInt FMA,
+  checked against C's `fma` on 200,000 random triples.
+
+**Measured once (2026-10-04)**, driven headlessly (Chrome 154, ANGLE on Metal, Apple M4 Max)
+frame by frame at n / 60 from a fresh instance (`window.__lowbandDemo.hooks`: `fresh()`, and
+`afterRender` to read the canvas and the held input inside the frame) against
+`lbtest --pipe --fps 60` on the same input frames read back from the page, with the same
+values `--set`: the defaults on the Synthetic scene at 320×180 over 30 frames, 3,075 of
+6,912,000 channel values differ, each by 1/255; no noise, clog or dropouts, 10 frames, 789
+of 2,304,000 by 1; NTSC, Sync AGC on, Mix 0.5 on Lights on black at 1280×720, 6 frames,
+30,539 of 22,118,400 by 1; a Hi8 deck on colour bars at 640×360, 6 frames, 1,496 of
+5,529,600 by 1. Never more than 1, alpha never. It can fail: the page at the defaults
+against the pipe at Head Clog 0.41 (not 0.40) makes 335,226 values differ, 144 by more than
+1, up to 38. Paused, the same frame twice is identical; from the defaults, Recording →
+Video8 moves the picture a mean 31.8 levels, Deck → Hi8 30.9, Head Clog 1 25.4, Mix 0.5
+15.7, Sync AGC 15.5, NTSC 13.3, Tape Noise 0 9.9, Dropouts 1 0.5. No console errors.
+
+**What differs, each said on the page:** the frame rate (the last finished frame, a little
+behind a playing clip); the clock is the kit's in declared seconds (no unit vote; paused
+re-renders the same video frame; Restart is a backward clock, which steps on 1/60 s; the
+kit caps a frame at 0.1 s, so the 0.5 s jump never happens), updated on every frame the page
+draws; libm against Math; the input is a generated clip at 640×360–1920×1080 or the
+visitor's own file; no sound (the plugin has none); the test hooks are off and the About
+block is absent.
+
+**Traps.** The kit redraws on every change, and a finished frame needs a redraw to be shown,
+so a paused page must not take that redraw as a request: a frame key (time, size, clip,
+parameters), not a flag: with a flag, a Step clicked between a frame finishing and its
+redraw would never be computed. refport's `glGetIntegerv` writes one value except for `GL_VIEWPORT`:
+`ClientTransfer` queries single ints, and colourunder's stub (four values each) would
+overwrite the neighbours. Headless Chrome needs ANGLE on Metal (`--use-gl=angle
+--use-angle=metal --enable-gpu --ignore-gpu-blocklist`); cdpshot.py's default has no WebGL2.
+
+Deploy: push to main (`.github/workflows/deploy.yml`) or `cf-run npx wrangler deploy` from
+the repo root. The host is a Worker **route** over a proxied `AAAA 100::` record made through
+the API on 2026-10-04, not a custom domain: the zone is at Cloudflare's limit of 100. Delete
+that record and the page goes dark while deploys stay green. Verify by content:
+`curl -s 'https://lowband-demo.stoatworks-labs.com/?cb=1' | grep -o '<title>[^<]*'`.
+
+---
+
 ## Not done
 
 Released as v0.1.0 on 4 October 2026: registered in the fleet's three tables, so

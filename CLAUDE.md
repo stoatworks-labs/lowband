@@ -101,6 +101,27 @@ tolerance.
 - **Reverting a mutation:** Apple's make compares mtimes to the second. Delete the object
   (`build/CMakeFiles/lowband_core.dir/source/X.cpp.o`) or the reverted source is not rebuilt.
 
+## Browser demo
+
+`demo/` is the page at **lowband-demo.stoatworks-labs.com**, deployed from `wrangler.toml`
+(a Worker route over a proxied `AAAA 100::` DNS record, not a custom domain) by any push to
+main (`.github/workflows/deploy.yml`) or `cf-run npx wrangler deploy` — no build step; what
+is committed is what is served. `demo/vendor/` is copied in by
+`~/Projects/infrastructure/stoatworks-backend/resolume-demo/sync.sh lowband` and is not a
+place to edit.
+- **A shader change in the plugin: `python3 demo/tools/sync_shaders.py`**, then
+  `python3 demo/tools/check_shaders.py --dump DIR` after `lbtest --dump-shaders DIR`
+  (verify.sh does both). Never hand-edit the generated block.
+- **A change to Engine.cpp, Dsp.cpp, Model.cpp, Controls.cpp, Clock.cpp, the constructor or
+  ProcessOpenGL means the same change by hand in `demo/engine.js`, `dsp.js` or
+  `model.js`**, then `demo/tools/check_port.sh` (verify.sh runs it; `--quick` for three
+  scenarios): it compiles the plugin's own code under a recorder and compares every
+  uploaded float bit for bit. A C++ `float` operation is one `Math.fround`, in order.
+- The engine runs in Web Workers (`demo/engine-worker.js`), one line at a time — the
+  plugin's lanes are independent — and the page shows the last finished frame.
+- Verify the live page by content:
+  `curl -s 'https://lowband-demo.stoatworks-labs.com/?cb=1' | grep -o '<title>[^<]*'`.
+
 ## Not done yet
 - Never loaded into Resolume on macOS; Windows only through the Arena gate (no GPU).
 - Windows' CPU cost unknown. No OpenFX port or presets.
