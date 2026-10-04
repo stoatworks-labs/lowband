@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <thread>
 
 namespace lowband
@@ -53,7 +54,7 @@ void composite( const float* pix, int pixels, int syncN, int a0, float S, float 
 			const float y0 = level( i0 ), y1 = level( i0 + 1 );
 			v              = y0 + t * ( y1 - y0 );
 		}
-		dst[ static_cast< ptrdiff_t >( k - from ) * stride ] = v;
+		dst[ static_cast< std::ptrdiff_t >( k - from ) * stride ] = v;
 	}
 }
 
@@ -167,8 +168,8 @@ void Engine::recordBatch( const float* const* pix, const float* const* prev, int
 	for( int k = 0; k < L4; ++k )
 	{
 		composite( prev[ k ], pixels, syncN, a0, S, Wh, L - warm, L, a + k, L4 );
-		composite( pix[ k ], pixels, syncN, a0, S, Wh, 0, L, a + k + static_cast< ptrdiff_t >( warm ) * L4, L4 );
-		composite( nullptr, pixels, syncN, a0, S, Wh, 0, total - warm - L, a + k + static_cast< ptrdiff_t >( warm + L ) * L4, L4 );
+		composite( pix[ k ], pixels, syncN, a0, S, Wh, 0, L, a + k + static_cast< std::ptrdiff_t >( warm ) * L4, L4 );
+		composite( nullptr, pixels, syncN, a0, S, Wh, 0, total - warm - L, a + k + static_cast< std::ptrdiff_t >( warm + L ) * L4, L4 );
 	}
 
 	//--- record: Y low-pass, pre-emphasis, clips, FM.
@@ -366,11 +367,11 @@ void Engine::runBatch( const float* in, int lines, int pixels, const EngineSetti
 			default: return u3 * ( 1.0f / 6.0f );
 			}
 		};
-		const ptrdiff_t T = static_cast< ptrdiff_t >( total );
-		for( ptrdiff_t m = 0; m < T; ++m )
+		const std::ptrdiff_t T = static_cast< std::ptrdiff_t >( total );
+		for( std::ptrdiff_t m = 0; m < T; ++m )
 			for( int k = 0; k < L4; ++k )
 			{
-				auto at = [ & ]( ptrdiff_t i ) {
+				auto at = [ & ]( std::ptrdiff_t i ) {
 					return ( i >= 0 && i < T ) ? offset[ static_cast< size_t >( i ) * L4 + k ] : -1.0f;
 				};
 				pulses[ static_cast< size_t >( m ) * L4 + k ] = weight( at( m + 2 ), 0 ) + weight( at( m + 1 ), 1 ) + weight( at( m ), 2 ) + weight( at( m - 1 ), 3 );
