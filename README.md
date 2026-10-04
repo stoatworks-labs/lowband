@@ -11,9 +11,10 @@
 > against 0.0516 predicted from the sync the back porch still holds; the noise at white
 > over the noise at black is 2.6, where the deck band's |H| predicts 2.2 and a Video8 tape
 > gives 1.02; the head clog's taps realise Wallace's spacing loss to 1e-8 of the truncated
-> law — with twelve negative controls that prove each check can fail. It has **never been
-> loaded into Resolume**; it is loaded by [oxbow](https://github.com/stoatworks-labs/oxbow),
-> which is a real FFGL host and is not Resolume. See [Status](#status).
+> law — with twelve negative controls that prove each check can fail. On macOS it has
+> **never been loaded into Resolume**, only by [oxbow](https://github.com/stoatworks-labs/oxbow),
+> a real FFGL host that is not Resolume; on Windows a CI build loads, registers and renders in
+> Resolume Arena 7.27.1 on software rendering. See [Status](#status).
 
 A Hi8 tape played back on a Video8 deck, as an FFGL effect for
 [Resolume](https://resolume.com) Arena and Avenue.
@@ -104,9 +105,9 @@ on Resolume's demo clips. The output is opaque at Mix 1: a tape has no alpha.
 
 ## Status
 
-**Unreleased: a local v0.1.0, built 4 October 2026.** Not yet a fleet repo: no GitHub
-repo, no release, no website page, no user guide, no browser demo. The About block and
-ATTRIBUTIONS.md are provisional hand copies.
+**Released: v0.1.0, 4 October 2026**, for macOS (universal) and Windows (x64). The
+[user guide](https://stoatworks-labs.com/software/lowband/guide/) is the place to start;
+the [project page](https://stoatworks-labs.com/software/lowband/) has the downloads.
 
 ### Measured offline, on macOS
 
@@ -167,15 +168,27 @@ The FM chain runs on the CPU, eight lines in lock step on up to eight worker thr
 intake, the read-back and the upload. The size of the host barely matters: the chain always
 runs on the standard's own 701 × 576 (or 711 × 480) raster.
 
+### In Resolume, on Windows
+
+The fleet's Arena gate (`plugin-bench`) loaded a CI build of v0.1.0 into Resolume Arena
+7.27.1 on a Windows VM with no GPU (Mesa llvmpipe), 4 October 2026: 9 passed, 0 failed.
+`SW Lowband` registers as `LB01`, an effect; all 14 host controls match the declared name,
+order, type, range and default, including the two names at Resolume's length limit; the
+effect renders; Arena logged no shader or error lines and survived the run. 7 of the 9
+controls that can move the picture were shown doing so (Recording, Tape Noise, Deck, Head
+Clog, Sync AGC, Mix and Arena's own Opacity). Dropouts and Standard were inconclusive: the
+tape noise is drawn afresh every frame, and their change to one frame was no bigger than
+that floor. Software rendering says nothing about a GPU, or about speed.
+
 ### Not done
 
-- **Never loaded into Resolume**, on macOS or Windows. Never built on Windows.
+- **Never loaded into Resolume on macOS.** On Windows only on a VM with no GPU.
 - **Never compared with a real deck.** No capture of a Hi8 tape on a Video8 machine was
   found to check the look against.
 - Windows' CPU cost is unknown: the lane loops rely on the compiler vectorising them, which
   clang does here and MSVC may not.
 - Seen only on Resolume's bundled demo clips, never on camera footage.
-- No OpenFX port, no browser demo, no user guide, no presets.
+- No OpenFX port and no presets.
 
 ## Build
 

@@ -309,9 +309,15 @@ MSVC may not, and then the engine could be several times slower. An SSE path for
 
 ## Not done
 
-- **Never loaded into Resolume**, on either platform. Never built on Windows.
-- No GitHub repo, tag, release, website page, user guide, video, browser demo, OpenFX port
-  or presets. `StoatworksAbout.h` (no `guide`) and `ATTRIBUTIONS.md` are provisional hand
-  copies for the fleet's generators to replace.
-- Landing it: move to `~/Projects/resolume/lowband`, create the public repo, register it in
-  the three tables (projects.json, sync-about TARGETS, names.json), then the release brief.
+Released as v0.1.0 on 4 October 2026: registered in the fleet's three tables, so
+`StoatworksAbout*.h`, `ATTRIBUTIONS.md` and the issue forms are GENERATED (`sync-about`,
+`sync-attributions`, `sync-issue-templates` in stoatworks-backend) — edit the tables, not
+the files.
+
+- **Never loaded into Resolume on macOS.** On Windows, the Arena gate (plugin-bench, Arena
+  7.27.1, Mesa llvmpipe, no GPU) passed a CI build: 14 controls match, 7 of 9 move the
+  picture. Dropouts and Standard read inconclusive there, because the noise is fresh every
+  frame and the gate compares single frames: the gate's limit, not a dead control
+  (`tools/sweep.py` shows both live).
+- Windows' CPU cost is unmeasured (MSVC may not vectorise the lane loops).
+- No OpenFX port or presets.

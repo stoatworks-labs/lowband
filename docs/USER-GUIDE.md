@@ -28,7 +28,11 @@ captured from Resolume.*
 > prediction, and the deck's band is a decoder's stand-in (see Where the numbers come from). On
 > macOS it has **never been loaded into Resolume**; the one host it has run in there is the fleet's
 > own test host, `oxbow`.
-> WINDOWS_GATE_PENDING
+> On Windows, a CI build of v0.1.0 loads, registers and renders in Resolume Arena 7.27.1, with all
+> 14 host controls matching what the plugin declares, and 7 of the 9 that can move the picture shown
+> doing so. Dropouts and Standard could not be shown there: the tape noise changes every frame, and
+> their change to a single frame was no bigger than that. On software rendering, so that says
+> nothing about a GPU or about speed.
 > Try it on a spare layer before you put it in a show.
 >
 > This codebase was created with AI assistance, directed and reviewed by a human author.
@@ -270,7 +274,6 @@ Windows  %LOCALAPPDATA%\lowband\logs\lowband.YYYY-MM-DD.log
 - **Never seen on camera footage**, only on Resolume's bundled CG loops.
 - **Only ever run on an Apple M4 Max**, although the macOS build contains an Intel slice.
 - **No presets and no OpenFX version.**
-- DEMO_PENDING
 
 ---
 
