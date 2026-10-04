@@ -17,6 +17,14 @@
 #                 plugin hands the driver. Then a grep for every GLSL 4.10
 #                 reserved word used as an identifier, because Apple's compiler
 #                 and glslc accept some (`packed`) that Mesa refuses.
+#   demo          the browser demo's copy of every shader is still the plugin's,
+#                 character for character, and every stage it assembles is
+#                 what the plugin compiles (demo/tools/check_shaders.py --dump);
+#                 and its hand PORT of the CPU engine (demo/model.js, dsp.js,
+#                 engine.js) still gives every declaration, design, setting and
+#                 float of the uploaded picture that the plugin's own
+#                 constructor, ProcessOpenGL and Engine do, run under a
+#                 recorder (demo/tools/check_port.sh).
 #   physics       every harness check, at THREE rasters: 320x180, which is what
 #                 CI renders at (fewer host rows than lines, a host pixel 2.2
 #                 raster pixels); 960x540; and 1280x720. Each measures its
@@ -133,6 +141,37 @@ else
 	printf '%s\n' "$hits" | sed 's/^/      /'
 fi
 
+#---------------------------------------------------------------------------
+# The browser demo. Its copy of every shader is the plugin's, character for
+# character, and each stage the page assembles is byte for byte the one the
+# plugin compiled, dumped above: a shader change means
+# `python3 demo/tools/sync_shaders.py`, never a hand edit of demo/plugin.js.
+# Then its PORT of the CPU engine against the plugin's own C++ (check_port.sh
+# exits 3 to skip without node or a compiler). Neither says anything about the
+# page's GL half; only a reader and the page-against---pipe comparison in
+# AGENTS.md check that.
+#---------------------------------------------------------------------------
+step "demo"
+if [ -f demo/tools/check_shaders.py ]; then
+	if out=$(python3 demo/tools/check_shaders.py --dump "$dir" 2>&1); then
+		pass "$( printf '%s\n' "$out" | tail -1 )"
+	else
+		fail "the demo's shaders have drifted from source/ -- run: python3 demo/tools/sync_shaders.py"
+		printf '%s\n' "$out" | tail -14
+	fi
+	out=$(demo/tools/check_port.sh 2>&1)
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		pass "$( printf '%s\n' "$out" | grep -E '^ok +[0-9]+ scenarios' | sed 's/^ok *//' )"
+	elif [ "$status" -eq 3 ]; then
+		printf '   skipped: %s\n' "$out"
+	else
+		fail "the demo's port (demo/engine.js, dsp.js, model.js) no longer matches the plugin's C++ -- run: demo/tools/check_port.sh"
+		printf '%s\n' "$out" | tail -14
+	fi
+else
+	printf '   skipped: no demo/\n'
+fi
 rm -rf "$dir"
 
 for size in 320x180 960x540 1280x720; do
