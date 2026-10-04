@@ -325,10 +325,11 @@ void Engine::runBatch( const float* in, int lines, int pixels, const EngineSetti
 		//a carrier 7.5 samples a cycle (Video8's white) is up to 1 % of a
 		//sample out, in a pattern that repeats every four crossings: a
 		//2.7 MHz ripple on a flat field. The cubic takes it to 0.01 %.
+		const bool risingOnly = ( s.perturb & model::kPerturbRisingOnly ) != 0;
 		for( size_t i = L4; i < n; ++i )
 		{
 			const float x0   = x[ i - L4 ], x1 = x[ i ];
-			const bool cross = ( x0 < 0.0f ) != ( x1 < 0.0f );
+			const bool cross = risingOnly ? ( x0 < 0.0f && x1 >= 0.0f ) : ( x0 < 0.0f ) != ( x1 < 0.0f );
 			float u          = cross ? x0 / ( x0 - x1 ) : -1.0f;
 			if( cross && i >= 2 * static_cast< size_t >( L4 ) && i + L4 < n )
 			{

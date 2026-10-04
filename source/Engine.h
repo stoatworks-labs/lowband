@@ -96,6 +96,19 @@ public:
 	/// 40.5 MHz, for a picture line `row` of the last Process call's input.
 	std::vector< float > DeckLineForTest( const float* in, int lines, int pixels, const EngineSettings& s, int row );
 
+	/// The head clog's FIR taps this configuration runs (empty for none).
+	const std::vector< float >& ClogTapsForTest( const EngineSettings& s )
+	{
+		configure( s );
+		return chain.clogTaps;
+	}
+	/// The deck's compensated delay for this configuration, in samples.
+	double DelayForTest( const EngineSettings& s )
+	{
+		configure( s );
+		return delay;
+	}
+
 	/// Bytes the engine holds between frames (filter designs only).
 	size_t StateBytes() const;
 

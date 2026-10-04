@@ -52,7 +52,10 @@ const Standard kStandards[ kStandardCount ] = {
 	low-pass after the demodulator: vhs-decode's, 3.5 MHz and 5.0 MHz. The
 	recording's luma low-pass is assumed to be the same band.
 */
-const double kShelfX = 3.786301;//10^( 11.5794 / 20 )
+/// The shelf's gain, from vhs-decode's dB figure (computed, not typed: a
+/// hand-typed 3.7863 for 10^( 11.5794 / 20 ) = 3.7930 was --model's first
+/// catch).
+const double kShelfX = std::pow( 10.0, 11.5794 / 20.0 );
 
 const Format kFormats[ kFormatCount ] = {
 	{ "Video8", 4.2e6, 1.2e6, 1.30e-6, kShelfX, 3.5e6, 2.2, 0.9, 1.9e6, 7.0e6, 3.5e6 },

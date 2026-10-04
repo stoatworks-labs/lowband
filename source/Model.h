@@ -44,6 +44,8 @@ enum Perturb : int
 	kPerturbSeedByWorker      = 1 << 6,///< the noise seeded by worker, not by line (--threads must fail)
 	kPerturbResizeResetsClock = 1 << 7,///< a resize restarts the clock (the photofinish class of bug)
 	kPerturbHi8AtVideo8Tip    = 1 << 8,///< Hi8 written from Video8's sync tip (--carrier must fail)
+	kPerturbRisingOnly        = 1 << 9,///< the demodulator counts only rising crossings (--matched must fail; a
+	                                  ///< carrier offset would not: the back-porch clamp takes any DC out)
 };
 
 //---------------------------------------------------------------------------

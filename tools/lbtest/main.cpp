@@ -639,72 +639,6 @@ void note( bool quiet, const char* format, ... )
 	va_end( args );
 }
 
-//===========================================================================
-// THE CHECKS
-//===========================================================================
-
-struct Check
-{
-	const char* flag;
-	int ( *run )( int, int, int, bool );
-	const char* help;
-	int negativeBits;      ///< the perturbation that must fail it (0: none)
-	const char* negativeWhat;
-};
-
-//---------------------------------------------------------------------------
-// --names and --model: no GL.
-//---------------------------------------------------------------------------
-int runNames()
-{
-	std::printf( "names: nothing the host will silently truncate; every name unique\n" );
-	Lowband plugin;
-	int failures = 0;
-	std::set< std::string > seen;
-	for( const NamedParameter& p : listParameters( plugin ) )
-	{
-		if( p.index >= Lowband::PT_ABOUT_FIRST )
-			continue;
-		//Arena addresses a parameter by its name lower-cased with the spaces
-		//removed: two that reduce alike are one parameter to it.
-		std::string key;
-		for( char c : p.name )
-			if( c != ' ' )
-				key += static_cast< char >( std::tolower( static_cast< unsigned char >( c ) ) );
-		failures += report( p.name.size() <= 16, false, "%-16s %2zu characters", p.name.c_str(), p.name.size() );
-		failures += report( seen.insert( key ).second, false, "%-16s unique as Arena addresses it ('%s')", p.name.c_str(), key.c_str() );
-	}
-	failures += report( std::string( "SW Lowband" ).size() <= 16, false, "display name 'SW Lowband' is %zu characters", std::string( "SW Lowband" ).size() );
-	return failures;
-}
-
-int runModel()
-{
-	return 0;
-}
-
-const Check kChecks[] = {
-	{ "--placeholder", nullptr, "", 0, "" },
-};
-
-int runNegative( int W, int H )
-{
-	std::printf( "negative controls: each perturbation of the plugin's model must FAIL its check, %dx%d\n", W, H );
-	int failures = 0;
-	for( const Check& c : kChecks )
-	{
-		if( c.negativeBits == 0 || c.run == nullptr )
-			continue;
-		const int before = g_failures;
-		const int checks = g_checks;
-		const int failed = c.run( W, H, c.negativeBits, true );
-		g_failures       = before;
-		g_checks         = checks;
-		failures += report( failed > 0, false, "%-44s -> %s fails (%d of its checks)", c.negativeWhat, c.flag, failed );
-	}
-	return failures;
-}
-
 //---------------------------------------------------------------------------
 // The moving card, for --out, the sweep and the bench: a row of colour
 // patches, a grey ramp, a white disc on an orbit, a static black square, a
@@ -756,6 +690,1200 @@ std::vector< unsigned char > buildCard( int width, int height, int64_t frame )
 			px[ 3 ]           = 255;
 		}
 	return img;
+}
+
+//===========================================================================
+// THE CHECKS
+//===========================================================================
+
+struct Check
+{
+	const char* flag;
+	int ( *run )( int, int, int, bool );
+	const char* help;
+	int negativeBits;      ///< the perturbation that must fail it (0: none)
+	const char* negativeWhat;
+	bool gl;               ///< needs a GL context (the rest drive the engine alone)
+};
+
+//---------------------------------------------------------------------------
+// The formats and standards as the sources state them, typed HERE
+// (ATTRIBUTIONS.md), never read out of the plugin: a constant typed wrong in
+// Model.cpp has to show up as a failed check, not as an agreement.
+//---------------------------------------------------------------------------
+struct StatedFormat
+{
+	const char* name;
+	double tipMHz, devMHz;  ///< Sencore Tech Tip 189
+	double tauUs, xDb;      ///< vhs-decode format_defs/video8.py
+	double rfHighMHz, rfLowMHz, yLowMHz;
+};
+const StatedFormat kStatedFormats[ 2 ] = {
+	{ "Video8", 4.2, 1.2, 1.30, 11.5794, 1.9, 7.0, 3.5 },
+	{ "Hi8", 5.7, 2.0, 0.47, 11.5794, 1.85, 10.3, 5.0 },
+};
+
+struct StatedStandard
+{
+	const char* name;
+	double lineUs, front, sync, back;///< BT.470-6 / SMPTE 170M
+	int lines;
+	double S, Wh;                    ///< volts below / above blanking
+	double fps, fH, underFh;         ///< frame rate, line rate, colour-under carrier in fH
+};
+const StatedStandard kStatedStandards[ 2 ] = {
+	{ "PAL", 64.0, 1.65, 4.7, 5.7, 576, 0.3, 0.7, 25.0, 15625.0, 46.875 },
+	{ "NTSC", 1001.0 / 15.75, 1.5, 4.7, 4.7, 480, 40.0 / 140.0, 100.0 / 140.0, 30000.0 / 1001.0, 15750000.0 / 1001.0, 47.25 },
+};
+
+constexpr double kFs = 40.5e6;
+
+double shelfX( const StatedFormat& f )
+{
+	return std::pow( 10.0, f.xDb / 20.0 );
+}
+
+/// The carrier, Hz, for a level in volts above blanking.
+double carrierHz( const StatedFormat& f, const StatedStandard& st, double volts )
+{
+	return ( f.tipMHz + ( volts + st.S ) / ( st.S + st.Wh ) * f.devMHz ) * 1e6;
+}
+
+/// |H| of the deck's RF band (the analogue Butterworth prototypes).
+double rfGain( const StatedFormat& deck, double fHz, double lowMHz = -1.0 )
+{
+	const double lo = lowMHz > 0.0 ? lowMHz : deck.rfLowMHz;
+	return std::abs( dsp::AnalogueButterworth( 2, deck.rfHighMHz * 1e6, fHz, true ) * dsp::AnalogueButterworth( 8, lo * 1e6, fHz, false ) );
+}
+
+/// The worst residual of the 2f carrier after the demodulator's 8th-order
+/// low-pass, in Y' (fraction of white), over carriers [ fLo, fHi ]: the
+/// fundamental 2f has the amplitude f of the mean (a pulse train's
+/// harmonics), attenuated by the low-pass at 2 fLo, then x^-1 by the
+/// de-emphasis, and mapped by the deck's volts per Hz.
+double rippleBound( const StatedFormat& deck, const StatedStandard& st, double fLo, double fHi )
+{
+	const double h = std::abs( dsp::AnalogueButterworth( 8, deck.yLowMHz * 1e6, 2.0 * fLo, false ) );
+	return 2.0 * fHi * h / shelfX( deck ) / ( deck.devMHz * 1e6 ) * ( st.S + st.Wh ) / st.Wh;
+}
+
+int samplesOf( double us )
+{
+	return static_cast< int >( std::lround( us * kFs * 1e-6 ) );
+}
+
+/// The deck's picture as the plugin uploaded it (Y', U, V, 1), line 0 first.
+struct Deck
+{
+	std::vector< float > lines;
+	int P = 0, N = 0;
+	double y( int line, int pixel ) const
+	{
+		return lines[ ( static_cast< size_t >( line ) * P + pixel ) * 4 ];
+	}
+	/// Mean Y' over lines [ l0, l1 ) and pixels [ p0, p1 ).
+	double mean( int l0, int l1, int p0, int p1 ) const
+	{
+		double s = 0.0;
+		for( int l = l0; l < l1; ++l )
+			for( int p = p0; p < p1; ++p )
+				s += y( l, p );
+		return s / ( static_cast< double >( l1 - l0 ) * ( p1 - p0 ) );
+	}
+};
+
+Deck renderDeck( Session& s, long frame, const Picture& picture )
+{
+	Deck d;
+	if( !s.render( frame, picture ) )
+		return d;
+	d.lines = s.plugin.LinesForTest();
+	const model::Standard& st = model::StandardOf( s.plugin.LastSettingsForTest().standard );
+	d.P                       = st.ActivePixels();
+	d.N                       = st.frameLines;
+	return d;
+}
+
+/// Raster pixel of the time t us after the active picture's start.
+int pixelAt( double us )
+{
+	return static_cast< int >( std::lround( us * 13.5 - 1.0 / 3.0 ) );
+}
+
+/// A grey picture, left part at a, right part at b, split at a fraction of
+/// the width.
+Picture twoLevel( int W, int H, double a, double b, double split )
+{
+	Picture p( static_cast< size_t >( W ) * H * 4 );
+	const int xs = static_cast< int >( std::lround( split * W ) );
+	for( int r = 0; r < H; ++r )
+		for( int x = 0; x < W; ++x )
+		{
+			float* px = p.data() + ( static_cast< size_t >( r ) * W + x ) * 4;
+			px[ 0 ] = px[ 1 ] = px[ 2 ] = static_cast< float >( x < xs ? a : b );
+			px[ 3 ]                     = 1.0f;
+		}
+	return p;
+}
+
+/// As twoLevel, with the split moved right by ( block % 8 ) host pixels for
+/// each block of 16 host rows: the edge meets the 40.5 MHz grid at eight
+/// different phases.
+Picture twoLevelStaggered( int W, int H, double a, double b, double split )
+{
+	Picture p( static_cast< size_t >( W ) * H * 4 );
+	const int base = static_cast< int >( std::lround( split * W ) );
+	for( int r = 0; r < H; ++r )
+	{
+		const int xs = base + ( r / 16 ) % 8;
+		for( int x = 0; x < W; ++x )
+		{
+			float* px = p.data() + ( static_cast< size_t >( r ) * W + x ) * 4;
+			px[ 0 ] = px[ 1 ] = px[ 2 ] = static_cast< float >( x < xs ? a : b );
+			px[ 3 ]                     = 1.0f;
+		}
+	}
+	return p;
+}
+
+//---------------------------------------------------------------------------
+// --carrier: the recorded FM's frequency, by counting crossings.
+//---------------------------------------------------------------------------
+/// Frequency over samples [ i0, i1 ) of an RF line: ( crossings - 1 ) / 2
+/// over the time from the first crossing to the last, each placed by linear
+/// interpolation.
+double countedHz( const std::vector< float >& rf, int i0, int i1 )
+{
+	double first = -1.0, last = -1.0;
+	int crossings = 0;
+	for( int i = std::max( 1, i0 ); i < i1; ++i )
+	{
+		const double x0 = rf[ static_cast< size_t >( i - 1 ) ], x1 = rf[ static_cast< size_t >( i ) ];
+		if( ( x0 < 0.0 ) != ( x1 < 0.0 ) )
+		{
+			const double t = ( i - 1 ) + x0 / ( x0 - x1 );
+			if( first < 0.0 )
+				first = t;
+			last = t;
+			++crossings;
+		}
+	}
+	if( crossings < 3 )
+		return 0.0;
+	return ( crossings - 1 ) / 2.0 / ( ( last - first ) / kFs );
+}
+
+/// The worst error, in samples, of a linearly interpolated zero crossing of
+/// a sinusoid at f sampled at 40.5 MHz, over every phase of the samples.
+double linearCrossingError( double fHz )
+{
+	const double h = 2.0 * kPi * fHz / kFs;//radians a sample
+	double worst   = 0.0;
+	for( int k = 0; k <= 1000; ++k )
+	{
+		//The crossing at theta = 0, the sample before it at -u h.
+		const double u  = k / 1000.0;
+		const double s0 = std::sin( -u * h ), s1 = std::sin( ( 1.0 - u ) * h );
+		const double t  = s0 / ( s0 - s1 );//estimate of u
+		worst           = std::max( worst, std::fabs( t - u ) );
+	}
+	return worst;
+}
+
+int runCarrier( int, int, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "carrier: the recorded FM at the sync tip, blanking and peak white, by counting crossings\n" );
+	int failures = 0;
+	lowband::Engine engine;
+	for( int si = 0; si < 2; ++si )
+		for( int fi = 0; fi < 2; ++fi )
+		{
+			const StatedStandard& st = kStatedStandards[ si ];
+			const StatedFormat& f    = kStatedFormats[ fi ];
+			lowband::EngineSettings s;
+			s.standard  = si;
+			s.recording = fi;
+			s.deck      = fi;
+			s.noise     = false;
+			s.perturb   = perturb;
+			const model::Standard& ms = model::StandardOf( si );
+			const int a0             = ms.ActiveStart();
+			//Settled: the pre-emphasis's step response is 1 + ( x - 1 ) e^{-t x / tau},
+			//so the residual after t0 is at most ( x - 1 ) e^{-t0 x / tau} of the step.
+			auto settle = [ & ]( double t0us, double stepV ) {
+				return ( shelfX( f ) - 1.0 ) * std::exp( -t0us * shelfX( f ) / f.tauUs ) * stepV * f.devMHz * 1e6 / ( st.S + st.Wh );
+			};
+			const std::vector< float > white = engine.RecordFlatForTest( s, 1.0 );
+			const std::vector< float > black = engine.RecordFlatForTest( s, 0.0 );
+			const double tip   = countedHz( black, samplesOf( 2.0 ), samplesOf( 4.5 ) );
+			const double blank = countedHz( black, a0 + samplesOf( 10.0 ), a0 + samplesOf( 40.0 ) );
+			const double wh    = countedHz( white, a0 + samplesOf( 10.0 ), a0 + samplesOf( 40.0 ) );
+			const double wantTip = carrierHz( f, st, -st.S ), wantBlank = carrierHz( f, st, 0.0 ), wantWhite = carrierHz( f, st, st.Wh );
+			//The count's own error: the first and last crossings each placed to
+			//within the linear interpolation's worst error, over the window.
+			auto counting = [ & ]( double fHz, double us ) {
+				return 2.0 * linearCrossingError( fHz ) / ( us * kFs * 1e-6 ) * fHz;
+			};
+			const double tolTip   = settle( 2.0, st.S ) + counting( wantTip, 2.5 ) + 1e-6 * wantTip;
+			const double tolBlank = settle( 10.0, st.Wh ) + counting( wantBlank, 30.0 ) + 1e-6 * wantBlank;
+			const double tolLine  = settle( 10.0, st.Wh ) + counting( wantWhite, 30.0 ) + 1e-6 * wantWhite;
+			failures += report( std::fabs( tip - wantTip ) <= tolTip, quiet, "%s %-6s sync tip    %.4f MHz (stated %.4f, +-%.4f)", st.name, f.name, tip / 1e6, wantTip / 1e6, tolTip / 1e6 );
+			failures += report( std::fabs( blank - wantBlank ) <= tolBlank, quiet, "%s %-6s blanking   %.4f MHz (stated %.4f, +-%.4f)", st.name, f.name, blank / 1e6, wantBlank / 1e6, tolBlank / 1e6 );
+			failures += report( std::fabs( wh - wantWhite ) <= tolLine, quiet, "%s %-6s peak white %.4f MHz (stated %.4f, +-%.4f)", st.name, f.name, wh / 1e6, wantWhite / 1e6, tolLine / 1e6 );
+		}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --matched: a deck playing its own format reproduces a flat field.
+//---------------------------------------------------------------------------
+int runMatched( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "matched: a deck playing its own format gives back the level it was given, %dx%d\n", W, H );
+	int failures = 0;
+	for( int si = 0; si < 2; ++si )
+		for( int fi = 0; fi < 2; ++fi )
+		{
+			const StatedStandard& st = kStatedStandards[ si ];
+			const StatedFormat& f    = kStatedFormats[ fi ];
+			Session s;
+			Knobs k;
+			k.standard  = si;
+			k.recording = fi;
+			k.deck      = fi;
+			if( !open( s, W, H, k, perturb, true ) )
+				return failures + 1;
+			//Levels the clips cannot reach: the pre-emphasis's overshoot at the
+			//picture's start, x 0.7 l above blanking, stays under the white
+			//clip (1.9 V) and its undershoot at the end, ( x - 1 ) 0.7 l,
+			//above the dark clip (0.9 x 0.7 V) for l <= 0.3.
+			const double levels[] = { 0.05, 0.15, 0.25 };
+			const double tol      = rippleBound( f, st, carrierHz( f, st, 0.0 ), carrierHz( f, st, st.Wh ) ) + 1e-4;
+			for( double level : levels )
+			{
+				const Deck d   = renderDeck( s, 10, flat( W, H, level ) );
+				const double m = d.mean( d.N / 4, 3 * d.N / 4, pixelAt( 10.0 ), d.P - pixelAt( 2.0 ) );
+				failures += report( std::fabs( m - level ) <= tol, quiet, "%s %-6s on its own deck: level %.2f reads %.5f (+-%.5f, the 2f residual)", st.name, f.name, level, m, tol );
+			}
+			s.end();
+		}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --gain: Hi8 on Video8 has the deviation ratio for a gain.
+//---------------------------------------------------------------------------
+/// The step from a to b at the middle of the line: the mean of the left part
+/// (10 us after the picture starts, to 2 us before the split) and of the
+/// right (10 us after the split, to 2 us before the end).
+void stepMeans( const Deck& d, const StatedStandard& st, double& left, double& right )
+{
+	const double active = st.lineUs - st.front - st.sync - st.back;
+	const double split  = active / 2.0;
+	left                = d.mean( d.N / 4, 3 * d.N / 4, pixelAt( 10.0 ), pixelAt( split - 2.0 ) );
+	right               = d.mean( d.N / 4, 3 * d.N / 4, pixelAt( split + 10.0 ), pixelAt( active - 2.0 ) );
+}
+
+int runGain( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "gain: Hi8 on a Video8 deck has a gain of 2.0 / 1.2 MHz; a matched deck 1, %dx%d\n", W, H );
+	int failures = 0;
+	struct Case
+	{
+		int rec, deck;
+	};
+	const Case cases[] = { { model::kHi8, model::kVideo8 }, { model::kVideo8, model::kVideo8 }, { model::kHi8, model::kHi8 } };
+	for( int si = 0; si < 2; ++si )
+		for( const Case& c : cases )
+		{
+			const StatedStandard& st = kStatedStandards[ si ];
+			const StatedFormat& tape = kStatedFormats[ c.rec ];
+			const StatedFormat& deck = kStatedFormats[ c.deck ];
+			Session s;
+			Knobs k;
+			k.standard  = si;
+			k.recording = c.rec;
+			k.deck      = c.deck;
+			if( !open( s, W, H, k, perturb, true ) )
+				return failures + 1;
+			const double a = 0.05, b = 0.25;
+			const Deck d   = renderDeck( s, 10, twoLevel( W, H, a, b, 0.5 ) );
+			double left, right;
+			stepMeans( d, st, left, right );
+			const double gain = ( right - left ) / ( b - a );
+			const double want = tape.devMHz / deck.devMHz;
+			//Each region's mean is off by at most the 2f residual, and by what
+			//is left of the slowest tail 10 us after the edge (the deck's
+			//de-emphasis, 1.3 us at the slowest: e^-7.7 of the step).
+			const double ripple = rippleBound( deck, st, carrierHz( tape, st, 0.0 ), carrierHz( tape, st, st.Wh ) );
+			const double tail   = std::exp( -10.0 / std::max( tape.tauUs, deck.tauUs ) ) * want;
+			const double tol    = ( 2.0 * ripple + tail ) / ( b - a ) + 1e-4;
+			failures += report( std::fabs( gain - want ) <= tol, quiet, "%s %-6s on %-6s: gain %.5f (stated %.5f = %.1f / %.1f, +-%.5f)", st.name, tape.name, deck.name, gain, want, tape.devMHz, deck.devMHz, tol );
+			s.end();
+		}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --emphasis: the mismatched pair leaves the deck's own time constant.
+//---------------------------------------------------------------------------
+int runEmphasis( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "emphasis: Hi8's pre-emphasis under Video8's de-emphasis leaves a tail with Video8's 1.3 us, %dx%d\n", W, H );
+	int failures = 0;
+	struct Case
+	{
+		int rec, deck;
+	};
+	const Case cases[] = { { model::kHi8, model::kVideo8 }, { model::kVideo8, model::kVideo8 }, { model::kHi8, model::kHi8 } };
+	for( const Case& c : cases )
+	{
+		const StatedStandard& st = kStatedStandards[ 0 ];
+		const StatedFormat& tape = kStatedFormats[ c.rec ];
+		const StatedFormat& deck = kStatedFormats[ c.deck ];
+		Session s;
+		Knobs k;
+		k.recording = c.rec;
+		k.deck      = c.deck;
+		if( !open( s, W, H, k, perturb, true ) )
+			return failures + 1;
+		const double a = 0.05, b = 0.25;
+		//The edge staggered over eight phases of the sample grid: the
+		//demodulator places each crossing to a few 1e-4 of a sample, in a
+		//pattern that repeats as the crossings slide past the grid (0.6 MHz
+		//for this step's 6.65 MHz carrier, +-0.1 % of white). Averaged over
+		//the eight it cancels; the tail is a sum of exponentials of one tau,
+		//so the average is one too. Measured from the LAST split.
+		const Deck d = renderDeck( s, 10, twoLevelStaggered( W, H, a, b, 0.5 ) );
+		double left, right;
+		stepMeans( d, st, left, right );
+		const double active = st.lineUs - st.front - st.sync - st.back;
+		const double split  = active / 2.0 + 7.0 * d.P / W / 13.5;
+		//The residual r(t) = y(t) - y(final), averaged down the whole frame,
+		//from 2.5 to 5 us after the split. The faster poles (the
+		//pre-emphasis's tau / x, 0.12 us; the low-passes, 0.23 us at the
+		//slowest) are gone by then; and so is most of the FM channel's own
+		//stretch: the carrier climbs through the tail, near Video8's band edge
+		//the band's group delay climbs with it, and early in the tail that
+		//draws the curve out (a fit from 1.5 us read 1.34 us).
+		std::vector< double > ts, rs;
+		const double fitFrom = 2.5, fitTo = 5.0;
+		for( int p = pixelAt( split + fitFrom ); p <= pixelAt( split + fitTo ); ++p )
+		{
+			ts.push_back( ( p + 1.0 / 3.0 ) / 13.5 );
+			rs.push_back( d.mean( 0, d.N, p, p + 1 ) - right );
+		}
+		const double ripple = rippleBound( deck, st, carrierHz( tape, st, 0.0 ), carrierHz( tape, st, st.Wh ) );
+		const double step   = right - left;
+		const bool mismatch = c.rec != c.deck;
+		auto fitTau = [ & ]( double bias ) {
+			//Least squares on ln | r + bias |: slope -1 / tau.
+			double sx = 0, sy = 0, sxx = 0, sxy = 0;
+			const double n = static_cast< double >( ts.size() );
+			for( size_t i = 0; i < ts.size(); ++i )
+			{
+				const double v = std::log( std::max( 1e-12, std::fabs( rs[ i ] + bias ) ) );
+				sx += ts[ i ];
+				sy += v;
+				sxx += ts[ i ] * ts[ i ];
+				sxy += ts[ i ] * v;
+			}
+			const double slope = ( n * sxy - sx * sy ) / ( n * sxx - sx * sx );
+			return -1.0 / slope;
+		};
+		if( mismatch )
+		{
+			const bool tail = std::fabs( rs.front() ) > 10.0 * ripple;
+			failures += report( tail, quiet, "%s on %s: the step has a slow tail, %.4f of it left %.1f us after the edge (the 2f residual is %.5f)", tape.name, deck.name, std::fabs( rs.front() ) / step,
+			                    fitFrom, ripple / step );
+			const double tau = tail ? fitTau( 0.0 ) : 0.0;
+			//The tolerance: refit with every residual moved by the 2f bound
+			//both ways; plus the band's group-delay swing over the window (the
+			//carrier at the window's start against the final one), as a
+			//fraction of the window, of tau; plus 1e-3 for the warp of a
+			//122 kHz pole at 40.5 MHz (1e-5) and the rows' averaging.
+			const double spread = tail ? std::max( std::fabs( fitTau( ripple ) - tau ), std::fabs( fitTau( -ripple ) - tau ) ) : 0.0;
+			const dsp::Cascade rfBand = dsp::ButterworthHighPass( 2, deck.rfHighMHz * 1e6, kFs ).Then( dsp::ButterworthLowPass( 8, deck.rfLowMHz * 1e6, kFs ) );
+			const double tapeV  = ( 0.25 * st.Wh - 0.05 * st.Wh );
+			const double fFinal = carrierHz( tape, st, 0.25 * st.Wh );
+			const double fStart = fFinal - std::fabs( rs.front() ) / step * tapeV * tape.devMHz * 1e6 / ( st.S + st.Wh );
+			const double swing  = std::fabs( rfBand.GroupDelay( 2.0 * kPi * fFinal / kFs ) - rfBand.GroupDelay( 2.0 * kPi * fStart / kFs ) ) / kFs * 1e6;
+			const double tol    = spread + swing / ( fitTo - fitFrom ) * deck.tauUs + 1e-3 * deck.tauUs;
+			failures += report( tail && std::fabs( tau - deck.tauUs ) <= tol, quiet, "%s on %s: the tail's time constant is %.4f us (the deck's de-emphasis, %.2f us; +-%.4f)", tape.name, deck.name, tau,
+			                    deck.tauUs, tol );
+			//And its sign: a rising step arrives short and creeps up.
+			failures += report( rs.front() < 0.0, quiet, "%s on %s: a rising step arrives short of its level and creeps up (residual %.4f)", tape.name, deck.name, rs.front() );
+		}
+		else
+			failures += report( std::fabs( rs.front() ) <= 3.0 * ripple + 1e-4, quiet, "%s on its own deck: no tail, %.6f left %.1f us after the edge (<= %.6f)", tape.name, std::fabs( rs.front() ), fitFrom, 3.0 * ripple + 1e-4 );
+		s.end();
+	}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --clamp: the black lifts by what the porch still holds of the sync.
+//---------------------------------------------------------------------------
+/// The step response of pre( s ) de( s ), pre = ( 1 + s t1 ) / ( 1 + s t1 / x ),
+/// de = ( 1 + s t2 / x ) / ( 1 + s t2 ), by residues: 1 + sum over the two
+/// poles of N( p ) / ( p D'( p ) ) e^{ p t }.
+double emphasisStep( double t1, double t2, double x, double t )
+{
+	if( t < 0.0 )
+		return 0.0;
+	auto N  = [ & ]( double s ) { return ( 1.0 + s * t1 ) * ( 1.0 + s * t2 / x ); };
+	auto Dp = [ & ]( double s ) { return ( t1 / x ) * ( 1.0 + s * t2 ) + ( 1.0 + s * t1 / x ) * t2; };
+	const double p1 = -x / t1, p2 = -1.0 / t2;
+	return 1.0 + N( p1 ) / ( p1 * Dp( p1 ) ) * std::exp( p1 * t ) + N( p2 ) / ( p2 * Dp( p2 ) ) * std::exp( p2 * t );
+}
+
+int runClamp( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "clamp: Hi8 on Video8 lifts the black by what the back porch still holds of the sync, %dx%d\n", W, H );
+	int failures = 0;
+	for( int si = 0; si < 2; ++si )
+	{
+		const StatedStandard& st = kStatedStandards[ si ];
+		const StatedFormat& tape = kStatedFormats[ 1 ];
+		const StatedFormat& deck = kStatedFormats[ 0 ];
+		const model::Standard& ms = model::StandardOf( si );
+		Session s;
+		Knobs k;
+		k.standard = si;
+		if( !open( s, W, H, k, perturb, true ) )
+			return failures + 1;
+		const Deck d    = renderDeck( s, 10, flat( W, H, 0.0 ) );
+		const double lift = d.mean( d.N / 4, 3 * d.N / 4, pixelAt( 20.0 ), pixelAt( 40.0 ) );
+
+		//The prediction: the sync pulse, -S over [ 0, T ), through Hi8's
+		//pre-emphasis and Video8's de-emphasis, x 2.0 / 1.2, read where the
+		//plugin's clamp reads (1 us after the sync to 0.5 us before the
+		//picture, offset by the deck's compensated delay) on the time the
+		//signal really took: the low-passes' delays and the RF band's at the
+		//porch's carrier, which the analytic response leaves out.
+		const double fs  = kFs;
+		const double D   = s.plugin.EngineForTest().DelayForTest( s.plugin.LastSettingsForTest() );
+		const int Dr     = static_cast< int >( std::lround( D ) );
+		const dsp::Cascade recY = dsp::ButterworthLowPass( 4, tape.yLowMHz * 1e6, fs );
+		const dsp::Cascade rf   = dsp::ButterworthHighPass( 2, deck.rfHighMHz * 1e6, fs ).Then( dsp::ButterworthLowPass( 8, deck.rfLowMHz * 1e6, fs ) );
+		const dsp::Cascade yLow = dsp::ButterworthLowPass( 8, deck.yLowMHz * 1e6, fs );
+		const double wBlank     = 2.0 * kPi * carrierHz( tape, st, 0.0 ) / fs;
+		const double wTip       = 2.0 * kPi * carrierHz( tape, st, -st.S ) / fs;
+		const double delta      = recY.GroupDelay( 0.0 ) + rf.GroupDelay( wBlank ) - 0.5 + yLow.GroupDelay( 0.0 );
+		const double T          = st.sync;
+		const double G          = tape.devMHz / deck.devMHz;
+		const int p0            = Dr + ms.SyncSamples() + samplesOf( 1.0 );
+		const int p1            = Dr + ms.ActiveStart() - samplesOf( 0.5 );
+		double porch            = 0.0;
+		for( int i = p0; i < p1; ++i )
+		{
+			const double t = ( i - delta ) / fs * 1e6;
+			porch += G * ( -st.S ) * ( emphasisStep( tape.tauUs, deck.tauUs, shelfX( tape ), t ) - emphasisStep( tape.tauUs, deck.tauUs, shelfX( tape ), t - T ) );
+		}
+		porch /= ( p1 - p0 );
+		const double want = -porch / st.Wh;
+		//Tolerance: the delay stands in for each low-pass's whole response, so
+		//the tail's level is off by the RF band's group delay swing over the
+		//sync's edge (tip to blanking) against 1.3 us, and by the low-passes'
+		//spread, second order: ( 0.15 us / 1.3 us )^2 < 2 %.
+		const double swing = std::fabs( rf.GroupDelay( wTip ) - rf.GroupDelay( wBlank ) ) / fs * 1e6;
+		const double ripple = rippleBound( deck, st, carrierHz( tape, st, -st.S ), carrierHz( tape, st, 0.0 ) );
+		const double tol   = std::fabs( want ) * ( swing / deck.tauUs + 0.02 ) + ripple;
+		failures += report( std::fabs( lift - want ) <= tol && want > 3.0 * ripple, quiet, "%s Hi8 on Video8: black reads %.5f, the porch's held sync predicts %.5f (+-%.5f)", st.name, lift, want, tol );
+		s.end();
+
+		//A matched deck does not lift.
+		Session m;
+		k.recording = model::kVideo8;
+		if( !open( m, W, H, k, perturb, true ) )
+			return failures + 1;
+		const Deck dm      = renderDeck( m, 10, flat( W, H, 0.0 ) );
+		const double black = dm.mean( dm.N / 4, 3 * dm.N / 4, pixelAt( 20.0 ), pixelAt( 40.0 ) );
+		const double rippleV8 = rippleBound( deck, st, carrierHz( deck, st, -st.S ), carrierHz( deck, st, 0.0 ) );
+		failures += report( std::fabs( black ) <= rippleV8 + 1e-4, quiet, "%s Video8 on Video8: black reads %.5f (<= %.5f)", st.name, black, rippleV8 + 1e-4 );
+		m.end();
+	}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --threshold: the carrier for white sits furthest outside the deck's band.
+//---------------------------------------------------------------------------
+int runThreshold( int W, int H, int perturb, bool quiet )
+{
+	const double cnr = 30.0;
+	if( !quiet )
+		std::printf( "threshold: at %.0f dB carrier-to-noise, Hi8's white is noisier than its black by the deck band's |H| ratio, %dx%d\n", cnr, W, H );
+	int failures = 0;
+	struct Case
+	{
+		int rec, deck;
+	};
+	const Case cases[] = { { model::kHi8, model::kVideo8 }, { model::kVideo8, model::kVideo8 } };
+	for( const Case& c : cases )
+	{
+		const StatedStandard& st = kStatedStandards[ 0 ];
+		const StatedFormat& tape = kStatedFormats[ c.rec ];
+		const StatedFormat& deck = kStatedFormats[ c.deck ];
+		double rms[ 2 ] = {};
+		for( int lv = 0; lv < 2; ++lv )
+		{
+			const double level = lv == 0 ? 0.0 : 1.0;
+			Session clean, noisy;
+			Knobs k;
+			k.recording = c.rec;
+			k.deck      = c.deck;
+			if( !open( clean, W, H, k, perturb, true ) )
+				return failures + 1;
+			k.cnrDb = cnr;
+			if( !open( noisy, W, H, k, perturb, false ) )
+				return failures + 1;
+			const Deck a = renderDeck( clean, 10, flat( W, H, level ) );
+			const Deck b = renderDeck( noisy, 10, flat( W, H, level ) );
+			double sum = 0.0;
+			long n     = 0;
+			for( int l = a.N / 4; l < 3 * a.N / 4; ++l )
+				for( int p = pixelAt( 10.0 ); p < a.P - pixelAt( 2.0 ); ++p )
+				{
+					const double e = b.y( l, p ) - a.y( l, p );
+					sum += e * e;
+					++n;
+				}
+			rms[ lv ] = std::sqrt( sum / n );
+			clean.end();
+			noisy.end();
+		}
+		//Above threshold a limiter and a frequency discriminator turn the
+		//noise in the band into output noise in proportion to noise over
+		//carrier: the noise in the band is the same at both levels, the
+		//carrier is |H( f )| of the band at its own frequency.
+		const double fBlack = carrierHz( tape, st, 0.0 ), fWhite = carrierHz( tape, st, st.Wh );
+		const double want   = rfGain( deck, fBlack ) / rfGain( deck, fWhite );
+		const double ratio  = rms[ 1 ] / rms[ 0 ];
+		//First-order theory: +-25 % for the demodulator's noise spectrum and
+		//the de-emphasis, which this ignores.
+		failures += report( ratio >= 0.75 * want && ratio <= 1.33 * want, quiet, "%s on %s: noise at white / at black %.3f (|H| at %.2f / %.2f MHz predicts %.3f; rms %.4f / %.4f)", tape.name, deck.name, ratio,
+		                    fBlack / 1e6, fWhite / 1e6, want, rms[ 1 ], rms[ 0 ] );
+		if( c.rec != c.deck )
+			failures += report( ratio > 1.5, quiet, "%s on %s: the highlights break up first (white %.2fx black)", tape.name, deck.name, ratio );
+	}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --streak: a bright edge's overshoot leaves the band and the crossings go.
+//---------------------------------------------------------------------------
+int runStreak( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "streak: Hi8 on Video8 dips below black after a black-to-white edge; on Hi8 it does not, %dx%d\n", W, H );
+	int failures = 0;
+	struct Case
+	{
+		int rec, deck;
+	};
+	const Case cases[] = { { model::kHi8, model::kVideo8 }, { model::kHi8, model::kHi8 } };
+	for( const Case& c : cases )
+	{
+		const StatedStandard& st = kStatedStandards[ 0 ];
+		const StatedFormat& tape = kStatedFormats[ c.rec ];
+		const StatedFormat& deck = kStatedFormats[ c.deck ];
+		Session s;
+		Knobs k;
+		k.recording = c.rec;
+		k.deck      = c.deck;
+		if( !open( s, W, H, k, perturb, true ) )
+			return failures + 1;
+		const Deck d = renderDeck( s, 10, twoLevel( W, H, 0.0, 1.0, 0.5 ) );
+		double left, right;
+		stepMeans( d, st, left, right );
+		const double active = st.lineUs - st.front - st.sync - st.back;
+		const double split  = active / 2.0;
+		double lowest       = 1e9;
+		for( int p = pixelAt( split - 1.0 ); p <= pixelAt( split + 1.0 ); ++p )
+			lowest = std::min( lowest, d.mean( d.N / 4, 3 * d.N / 4, p, p + 1 ) );
+		const double dip = left - lowest;
+		//The overshoot of a black-to-white edge after Hi8's pre-emphasis is
+		//clipped at 220 %: 10.1 MHz, where Video8's 8th-order band at 7 MHz
+		//passes |H| = 0.05. A deck whose band holds it (Hi8's, 10.3 MHz) only
+		//rings: its low-passes' undershoot is under a tenth of the step.
+		if( c.rec != c.deck )
+			failures += report( dip > 0.2 * ( right - left ), quiet, "%s on %s: the edge dips %.3f below black (%.0f%% of the step), |H( 10.1 MHz )| = %.3f", tape.name, deck.name, dip,
+			                    100.0 * dip / ( right - left ), rfGain( deck, 10.1e6 ) );
+		else
+			failures += report( dip < 0.1 * ( right - left ), quiet, "%s on %s: no streak, the edge dips %.3f (%.1f%% of the step)", tape.name, deck.name, dip, 100.0 * dip / ( right - left ) );
+		s.end();
+	}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --wallace: the head clog's loss is 54.6 d / lambda dB.
+//---------------------------------------------------------------------------
+int runWallace( int, int, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "wallace: the head clog's FIR loses 54.6 d / lambda dB, lambda = v / f, v a 40 mm drum at the frame rate\n" );
+	int failures = 0;
+	lowband::Engine engine;
+	for( int si = 0; si < 2; ++si )
+	{
+		const StatedStandard& st = kStatedStandards[ si ];
+		const double v           = kPi * 0.040 * st.fps;
+		for( double dUm : { 0.03, 0.08, 0.15 } )
+		{
+			lowband::EngineSettings s;
+			s.standard   = si;
+			s.clogMetres = dUm * 1e-6;
+			s.perturb    = perturb;
+			const std::vector< float >& taps = engine.ClogTapsForTest( s );
+			const int M                      = static_cast< int >( taps.size() / 2 );
+			//The ideal taps, h[ n ] = ( 2 / fs ) a ( 1 - (-1)^n e^{-a fs/2} ) /
+			//( a^2 + ( 2 pi n / fs )^2 ), realise e^{-a f} exactly below fs / 2;
+			//the plugin keeps |n| <= M. What it leaves out, summed to 1e6:
+			const double a = 2.0 * kPi * dUm * 1e-6 / v;
+			auto tailAt    = [ & ]( double fHz ) {
+                double t = 0.0;
+                for( int n = M + 1; n < 1000000; ++n )
+                {
+                    const double b    = 2.0 * kPi * n / kFs;
+                    const double sign = ( n & 1 ) ? -1.0 : 1.0;
+                    t += 2.0 * ( 2.0 / kFs ) * a * ( 1.0 - sign * std::exp( -a * kFs / 2.0 ) ) / ( a * a + b * b ) * std::cos( 2.0 * kPi * fHz * n / kFs );
+                }
+                return t;
+			};
+			for( double fMHz : { 4.2, 7.7, 10.1 } )
+			{
+				double h = 0.0;
+				for( int n = -M; n <= M; ++n )
+					h += taps[ static_cast< size_t >( n + M ) ] * std::cos( 2.0 * kPi * fMHz * 1e6 * n / kFs );
+				const double want     = 54.575 * dUm * 1e-6 * fMHz * 1e6 / v;
+				const double realised = std::exp( -a * fMHz * 1e6 ) - tailAt( fMHz * 1e6 );
+				const double lossDb   = -20.0 * std::log10( h );
+				//The taps are floats: 2M + 1 roundings of at most 2^-24 of each.
+				failures += report( std::fabs( h - realised ) <= ( 2 * M + 1 ) * kU * 2.0, quiet, "%s d %.2f um at %4.1f MHz: %.3f dB; Wallace %.3f, less the %d-tap truncation %.3f (%.1e off)", st.name, dUm, fMHz, lossDb, want,
+				                    2 * M + 1, -20.0 * std::log10( realised ), std::fabs( h - realised ) );
+				failures += report( std::fabs( lossDb - want ) <= 0.5, quiet, "%s d %.2f um at %4.1f MHz: within 0.5 dB of the law (%+.3f)", st.name, dUm, fMHz, lossDb - want );
+			}
+		}
+	}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --registration: a matched deck puts an edge back where it was.
+//---------------------------------------------------------------------------
+int runRegistration( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "registration: a matched deck puts a small luma step where the source had it, on the deck's raster, %dx%d\n", W, H );
+	int failures = 0;
+	for( int si = 0; si < 2; ++si )
+		for( int fi = 0; fi < 2; ++fi )
+		{
+			const StatedStandard& st = kStatedStandards[ si ];
+			const StatedFormat& f    = kStatedFormats[ fi ];
+			const model::Standard& ms = model::StandardOf( si );
+			const int P              = ms.ActivePixels();
+			Session s;
+			Knobs k;
+			k.standard  = si;
+			k.recording = fi;
+			k.deck      = fi;
+			if( !open( s, W, H, k, perturb, true ) )
+				return failures + 1;
+			//A small step stays clear of the clips. The split at a host pixel
+			//boundary: in raster pixels it is xs P / W. Measured on the deck's
+			//own raster (the picture the plugin uploads), every line averaged:
+			//the host picture point-samples it, and at 320 wide a host pixel is
+			//2.2 raster pixels (--display checks that pass on its own).
+			const double a = 0.4, b = 0.5;
+			const int xs   = static_cast< int >( std::lround( 0.5 * W ) );
+			const Deck d   = renderDeck( s, 10, twoLevel( W, H, a, b, 0.5 ) );
+			if( d.lines.empty() )
+				return failures + 1;
+			std::vector< double > y( static_cast< size_t >( P ) );
+			for( int p = 0; p < P; ++p )
+				y[ static_cast< size_t >( p ) ] = d.mean( 0, d.N, p, p + 1 );
+			const double mid = 0.5 * ( a + b );
+			double found     = -1.0;
+			for( int x = P / 4; x < 3 * P / 4 - 1; ++x )
+				if( ( y[ static_cast< size_t >( x ) ] - mid ) * ( y[ static_cast< size_t >( x + 1 ) ] - mid ) <= 0.0 && y[ static_cast< size_t >( x ) ] != y[ static_cast< size_t >( x + 1 ) ] )
+				{
+					found = x + ( mid - y[ static_cast< size_t >( x ) ] ) / ( y[ static_cast< size_t >( x + 1 ) ] - y[ static_cast< size_t >( x ) ] );
+					break;
+				}
+			//Raster pixel centres sit at p (the intake's pixel p covers
+			//[ p, p + 1 ) of the active line, centre p + 1/2): the source's edge
+			//is at xs P / W - 1/2 in centre coordinates.
+			const double offsetPx = found - ( static_cast< double >( xs ) * P / W - 0.5 );
+			//What a matched deck's compensation (the chain's DC group delays)
+			//leaves: a step's 50 % point sits later than the DC delay by the
+			//rise of the Butterworths' group delay toward their corners.
+			//Measured here by running the same small step through the
+			//baseband chain in double (record low-pass, pre-emphasis, the
+			//deck's low-pass, de-emphasis: the plugin's designs, a different
+			//route) against their DC delays. The RF band's delay is taken at
+			//the step's carrier against the blanking carrier the deck uses.
+			const double fs = kFs;
+			const dsp::Cascade chainBase = dsp::ButterworthLowPass( 4, f.yLowMHz * 1e6, fs )
+			                                   .Then( dsp::Shelf( f.tauUs * 1e-6, shelfX( f ), fs, false ) )
+			                                   .Then( dsp::ButterworthLowPass( 8, f.yLowMHz * 1e6, fs ) )
+			                                   .Then( dsp::Shelf( f.tauUs * 1e-6, shelfX( f ), fs, true ) );
+			std::vector< double > state( 64, 0.0 );
+			const int n0 = 400, nT = 1200;
+			double prev = 0.0, cross = -1.0;
+			{
+				std::vector< double > s1( chainBase.sections.size() ), s2( chainBase.sections.size() );
+				for( int i = 0; i < nT; ++i )
+				{
+					double x = i >= n0 ? 1.0 : 0.0;
+					for( size_t j = 0; j < chainBase.sections.size(); ++j )
+					{
+						const dsp::Biquad& q = chainBase.sections[ j ];
+						const double out     = q.b0 * x + s1[ j ];
+						s1[ j ]              = q.b1 * x - q.a1 * out + s2[ j ];
+						s2[ j ]              = q.b2 * x - q.a2 * out;
+						x                    = out;
+					}
+					if( cross < 0.0 && i > n0 && prev < 0.5 && x >= 0.5 )
+						cross = ( i - 1 ) + ( 0.5 - prev ) / ( x - prev );
+					prev = x;
+				}
+			}
+			//The step input crosses 50 % at n0 - 1/2 (between samples).
+			const dsp::Cascade rf = dsp::ButterworthHighPass( 2, f.rfHighMHz * 1e6, fs ).Then( dsp::ButterworthLowPass( 8, f.rfLowMHz * 1e6, fs ) );
+			const double wMid     = 2.0 * kPi * carrierHz( f, st, mid * st.Wh ) / fs;
+			const double wBlank   = 2.0 * kPi * carrierHz( f, st, 0.0 ) / fs;
+			const double expectSamples = ( cross - ( n0 - 0.5 ) ) - chainBase.GroupDelay( 0.0 ) + rf.GroupDelay( wMid ) - rf.GroupDelay( wBlank );
+			const double expectPx      = expectSamples / 3.0;
+			//Tolerance: a fifth of a 40.5 MHz sample for the FM chain's own
+			//placement (the demodulator's crossing error, the RF band's group
+			//delay across the step's carrier swing), and a twentieth of a pixel
+			//for the linear interpolation of the 50 % point between pixels.
+			const double tol = 0.05 + 0.2 / 3.0;
+			failures += report( found >= 0.0 && std::fabs( offsetPx - expectPx ) <= tol, quiet, "%s %-6s: the step lands %+.3f raster px from the source (%+.3f expected from the filters' shape; +-%.3f)", st.name, f.name, offsetPx,
+			                    expectPx, tol );
+			s.end();
+		}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --intake: the host frame onto the standard's raster.
+//---------------------------------------------------------------------------
+int runIntake( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "intake: each raster pixel is the area average of the host pixels it covers, as Y'UV, %dx%d\n", W, H );
+	int failures = 0;
+	for( int si = 0; si < 2; ++si )
+	{
+		const model::Standard& ms = model::StandardOf( si );
+		const int P = ms.ActivePixels(), N = ms.frameLines;
+		Session s;
+		Knobs k;
+		k.standard = si;
+		if( !open( s, W, H, k, perturb, true ) )
+			return failures + 1;
+		Picture p( static_cast< size_t >( W ) * H * 4 );
+		for( int r = 0; r < H; ++r )
+			for( int x = 0; x < W; ++x )
+			{
+				float* px = p.data() + ( static_cast< size_t >( r ) * W + x ) * 4;
+				px[ 0 ]   = static_cast< float >( 0.5 + 0.4 * std::sin( 0.13 * x + 0.02 * r ) );
+				px[ 1 ]   = static_cast< float >( 0.5 + 0.4 * std::cos( 0.07 * x - 0.05 * r ) );
+				px[ 2 ]   = static_cast< float >( ( ( x / 7 + r / 5 ) & 1 ) ? 0.9 : 0.1 );
+				px[ 3 ]   = 1.0f;
+			}
+		if( !s.render( 10, p ) )
+			return failures + 1;
+		const std::vector< float >& in = s.plugin.IntakeForTest();
+		double worst = 0.0;
+		for( int l = 0; l < N; l += 7 )
+			for( int i = 0; i < P; i += 3 )
+			{
+				//The exact area average, by the overlap of [ l H, ( l + 1 ) H ) with
+				//[ r N, ( r + 1 ) N ), and the same across, in double.
+				double rgb[ 3 ] = {};
+				for( int r = 0; r < H; ++r )
+				{
+					const double oy = std::max( 0.0, std::min( ( r + 1.0 ) * N, ( l + 1.0 ) * H ) - std::max( 1.0 * r * N, 1.0 * l * H ) );
+					if( oy <= 0.0 )
+						continue;
+					for( int x = 0; x < W; ++x )
+					{
+						const double ox = std::max( 0.0, std::min( ( x + 1.0 ) * P, ( i + 1.0 ) * W ) - std::max( 1.0 * x * P, 1.0 * i * W ) );
+						if( ox <= 0.0 )
+							continue;
+						for( int c = 0; c < 3; ++c )
+							rgb[ c ] += oy * ox * p[ ( static_cast< size_t >( r ) * W + x ) * 4 + c ];
+					}
+				}
+				float avg[ 3 ];
+				for( int c = 0; c < 3; ++c )
+					avg[ c ] = static_cast< float >( rgb[ c ] / ( static_cast< double >( H ) * W ) );
+				double y, u, v;
+				rgbToYuv( avg, y, u, v );
+				const float* got = in.data() + ( static_cast< size_t >( l ) * P + i ) * 4;
+				worst            = std::max( { worst, std::fabs( got[ 0 ] - y ), std::fabs( got[ 1 ] - u ), std::fabs( got[ 2 ] - v ) } );
+			}
+		//A sum of up to ( W / P + 1 ) ( H / N + 1 ) floats under 1: a few ulps.
+		failures += report( worst <= 2e-6, quiet, "%s: the intake is the host's area average in Y'UV (%.2g off at most, every 7th line and 3rd pixel)", ms.name, worst );
+		s.end();
+	}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --display: the host picture is the deck's.
+//---------------------------------------------------------------------------
+int runDisplay( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "display: the host picture is the deck's raster read back: nearest line, Catmull-Rom across, R'G'B' clamped; at the deck's own raster and at %dx%d\n", W, H );
+	int failures = 0;
+	for( int si = 0; si < 2; ++si )
+	{
+		const model::Standard& ms = model::StandardOf( si );
+		const int P = ms.ActivePixels(), N = ms.frameLines;
+		for( int pass = 0; pass < 2; ++pass )
+		{
+			const int w = pass == 0 ? P : W, h = pass == 0 ? N : H;
+			Session s;
+			Knobs k;
+			k.standard = si;
+			k.cnrDb    = 24.0;
+			if( !open( s, w, h, k, perturb, false ) )
+				return failures + 1;
+			const Picture p = yuvPicture( w, h, [ & ]( int x, int r, double& y, double& u, double& v ) {
+				y = 0.3 + 0.25 * std::sin( 0.05 * x ) * std::cos( 0.07 * r );
+				u = 0.08 * std::sin( 0.01 * x );
+				v = -0.06;
+			} );
+			if( !s.render( 10, p ) )
+				return failures + 1;
+			const std::vector< float > out   = s.readAll();
+			const std::vector< float >& deck = s.plugin.LinesForTest();
+			double worst = 0.0;
+			long clamped = 0;
+			for( int r = 0; r < h; ++r )
+			{
+				const int l = ( ( 2 * r + 1 ) * N ) / ( 2 * h );
+				for( int x = 0; x < w; ++x )
+				{
+					const double sx = ( x + 0.5 ) * P / w - 0.5;
+					const double i0 = std::floor( sx ), t = sx - i0;
+					const double t2 = t * t, t3 = t2 * t;
+					const double wt[ 4 ] = { 0.5 * ( -t3 + 2.0 * t2 - t ), 0.5 * ( 3.0 * t3 - 5.0 * t2 + 2.0 ), 0.5 * ( -3.0 * t3 + 4.0 * t2 + t ), 0.5 * ( t3 - t2 ) };
+					double yuv[ 3 ] = {};
+					for( int q = 0; q < 4; ++q )
+					{
+						const int i = std::clamp( static_cast< int >( i0 ) - 1 + q, 0, P - 1 );
+						for( int c = 0; c < 3; ++c )
+							yuv[ c ] += wt[ q ] * deck[ ( static_cast< size_t >( l ) * P + i ) * 4 + c ];
+					}
+					float rgb[ 3 ];
+					yuvToRgb( yuv[ 0 ], yuv[ 1 ], yuv[ 2 ], rgb );
+					for( int c = 0; c < 3; ++c )
+					{
+						const double want = std::clamp( static_cast< double >( rgb[ c ] ), 0.0, 1.0 );
+						clamped += want != rgb[ c ];
+						worst = std::max( worst, std::fabs( want - out[ ( static_cast< size_t >( r ) * w + x ) * 4 + c ] ) );
+					}
+				}
+			}
+			//Float arithmetic in the shader against double here: the weights and
+			//the matrix, a few ulps of values under 2.
+			failures += report( worst <= 1e-5, quiet, "%s at %dx%d: every host pixel is the deck's picture read back (%.2g off at most; %ld values clamped)", ms.name, w, h, worst, clamped );
+			s.end();
+		}
+	}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --dropout: a dropout disturbs its own line, from where it starts.
+//---------------------------------------------------------------------------
+int runDropout( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "dropout: a forced dropout disturbs its own line only, and only from its start, %dx%d\n", W, H );
+	int failures = 0;
+	const int line = 101;
+	const double us0 = 12.0, us1 = 16.0;
+	Session a, b;
+	Knobs k;
+	if( !open( a, W, H, k, perturb, true ) || !open( b, W, H, k, perturb, true ) )
+		return 1;
+	b.plugin.SetDropoutForTest( true, line, us0, us1 );
+	const Picture card = twoLevel( W, H, 0.3, 0.6, 0.5 );
+	const Deck da      = renderDeck( a, 10, card );
+	const Deck db      = renderDeck( b, 10, card );
+	int otherLines = 0, firstPixel = -1;
+	double inside  = 0.0;
+	for( int l = 0; l < da.N; ++l )
+		for( int p = 0; p < da.P; ++p )
+		{
+			const bool differs = da.y( l, p ) != db.y( l, p );
+			if( differs && l != line )
+				++otherLines;
+			if( differs && l == line && firstPixel < 0 )
+				firstPixel = p;
+			if( l == line && p >= pixelAt( us0 + 0.5 ) && p < pixelAt( us1 ) )
+				inside = std::max( inside, std::fabs( da.y( l, p ) - db.y( l, p ) ) );
+		}
+	//The chain is causal except for the deck's delay compensation, which
+	//moves the output D samples earlier, and the dropout's raised-cosine
+	//edge: nothing can change before us0 - edge - D.
+	const double D        = a.plugin.EngineForTest().DelayForTest( a.plugin.LastSettingsForTest() );
+	const double earliest = us0 - model::kDropoutEdgeUs - D / kFs * 1e6 - 1.0 / 13.5;
+	failures += report( otherLines == 0, quiet, "no other line changes (%d pixels did)", otherLines );
+	failures += report( firstPixel >= pixelAt( earliest ), quiet, "line %d changes from %.2f us (the dropout starts at %.1f; nothing may move before %.2f)", line, ( firstPixel + 1.0 / 3.0 ) / 13.5, us0, earliest );
+	failures += report( inside > 0.1, quiet, "and inside the dropout the line is broken (up to %.3f of white off)", inside );
+	a.end();
+	b.end();
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --threads: one worker and many give the same picture.
+//---------------------------------------------------------------------------
+int runThreads( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "threads: the deck's picture does not depend on the worker count, %dx%d\n", W, H );
+	int failures = 0;
+	std::vector< std::vector< float > > outs;
+	for( int threads : { 1, 3, 8 } )
+	{
+		Session s;
+		Knobs k;
+		k.cnrDb    = 20.0;
+		k.dropouts = 0.6;
+		k.clogUm   = 0.05;
+		if( !open( s, W, H, k, perturb, false ) )
+			return 1;
+		s.plugin.SetThreadsForTest( threads );
+		std::vector< float > all;
+		for( long f = 0; f < 6; ++f )
+		{
+			const std::vector< unsigned char > card = buildCard( W, H, f );
+			if( !s.render( f * 3, card ) )
+				return 1;
+			const std::vector< float >& l = s.plugin.LinesForTest();
+			all.insert( all.end(), l.begin(), l.end() );
+		}
+		outs.push_back( all );
+		s.end();
+	}
+	size_t differ = 0;
+	for( size_t i = 0; i < outs[ 0 ].size(); ++i )
+		differ += ( outs[ 1 ][ i ] != outs[ 0 ][ i ] ) + ( outs[ 2 ][ i ] != outs[ 0 ][ i ] );
+	failures += report( differ == 0, quiet, "1, 3 and 8 workers: six frames with noise, dropouts and a clog, bit for bit (%zu values differ)", differ );
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --resize: nothing is lost across a resize.
+//---------------------------------------------------------------------------
+int runResize( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "resize: every frame after a resize to 1.5x and back is the unresized run's, %dx%d\n", W, H );
+	int failures = 0;
+	auto run     = [ & ]( bool resize, std::vector< std::vector< float > >& out ) -> bool {
+		Session s;
+		Knobs k;
+		k.cnrDb    = 24.0;
+		k.dropouts = 0.5;
+		if( !open( s, W, H, k, perturb, false ) )
+			return false;
+		out.clear();
+		for( long m = 0; m < 40; ++m )
+		{
+			if( resize && m == 12 )
+				s.resize( W * 3 / 2, H * 3 / 2 );
+			if( resize && m == 18 )
+				s.resize( W, H );
+			const Picture p = yuvPicture( s.width, s.height, [ & ]( int x, int r, double& y, double& u, double& v ) {
+				y = 0.4 + 0.25 * std::sin( 0.07 * x + 0.05 * r );
+				u = 0.06;
+				v = -0.04;
+			} );
+			if( !s.render( m, p ) )
+				return false;
+			if( m >= 24 )
+				out.push_back( s.readAll() );
+		}
+		s.end();
+		return true;
+	};
+	std::vector< std::vector< float > > a, b;
+	if( !run( false, a ) || !run( true, b ) )
+		return 1;
+	//The deck is on the CPU and deterministic; only the display pass is the
+	//GPU's, and the software renderer is not bit-repeatable: four float ulps
+	//of the value is its allowance (gate's rule).
+	size_t differ = 0, moved = 0;
+	for( size_t f = 0; f < a.size(); ++f )
+		for( size_t i = 0; i < a[ f ].size(); ++i )
+		{
+			if( std::fabs( a[ f ][ i ] - b[ f ][ i ] ) > 4.0 * 2.0 * kU * std::fabs( a[ f ][ i ] ) + 1e-30 )
+				++differ;
+			moved += a[ f ][ i ] != a[ 0 ][ i ];
+		}
+	failures += report( differ == 0, quiet, "frames 24-39 after a resize to %dx%d and back: every subpixel is the unresized run's (%zu differ)", W * 3 / 2, H * 3 / 2, differ );
+	failures += report( moved > 0, quiet, "and those frames move (%zu subpixels change: the noise follows the clock), so there was state to keep", moved );
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --alpha: a tape has no alpha.
+//---------------------------------------------------------------------------
+int runAlpha( int W, int H, int perturb, bool quiet )
+{
+	if( !quiet )
+		std::printf( "alpha: output alpha is 1 at Mix 1 and the clip's at Mix 0, %dx%d\n", W, H );
+	int failures = 0;
+	Picture clear( static_cast< size_t >( W ) * H * 4, 0.0f );
+	for( size_t i = 0; i < clear.size(); i += 4 )
+		clear[ i ] = clear[ i + 1 ] = clear[ i + 2 ] = 0.25f;
+	for( double mix : { 1.0, 0.0 } )
+	{
+		Session s;
+		Knobs k;
+		k.mix = mix;
+		if( !open( s, W, H, k, perturb, true ) )
+			return 1;
+		if( !s.render( 10, clear ) )
+			return 1;
+		const std::vector< float > out = s.readAll();
+		double lo = 1e9, hi = -1e9, worst = 0.0;
+		for( size_t i = 0; i < out.size(); i += 4 )
+		{
+			lo = std::min( lo, static_cast< double >( out[ i + 3 ] ) );
+			hi = std::max( hi, static_cast< double >( out[ i + 3 ] ) );
+			if( mix == 0.0 )
+				for( int c = 0; c < 4; ++c )
+					worst = std::max( worst, std::fabs( static_cast< double >( out[ i + c ] ) - clear[ i + c ] ) );
+		}
+		if( mix == 1.0 )
+			failures += report( lo == 1.0 && hi == 1.0, quiet, "Mix 1 on a transparent clip: alpha %.3f..%.3f, opaque", lo, hi );
+		else
+			failures += report( worst <= 4.0 * kU, quiet, "Mix 0: the clip exactly, alpha 0 kept (%.2g off at most)", worst );
+		s.end();
+	}
+	return failures;
+}
+
+//---------------------------------------------------------------------------
+// --names and --model: no GL.
+//---------------------------------------------------------------------------
+int runNames()
+{
+	std::printf( "names: nothing the host will silently truncate; every name unique as Arena addresses it\n" );
+	Lowband plugin;
+	int failures = 0;
+	std::set< std::string > seen;
+	for( const NamedParameter& p : listParameters( plugin ) )
+	{
+		if( p.index >= Lowband::PT_ABOUT_FIRST )
+			continue;
+		//Arena addresses a parameter by its name lower-cased with the spaces
+		//removed: two that reduce alike are one parameter to it.
+		std::string key;
+		for( char c : p.name )
+			if( c != ' ' )
+				key += static_cast< char >( std::tolower( static_cast< unsigned char >( c ) ) );
+		failures += report( p.name.size() <= 16, false, "%-16s %2zu characters", p.name.c_str(), p.name.size() );
+		failures += report( seen.insert( key ).second, false, "%-16s unique as Arena addresses it ('%s')", p.name.c_str(), key.c_str() );
+	}
+	failures += report( std::string( "SW Lowband" ).size() <= 16, false, "display name 'SW Lowband' is %zu characters", std::string( "SW Lowband" ).size() );
+	return failures;
+}
+
+int runModel()
+{
+	std::printf( "model: the plugin's numbers against the stated ones\n" );
+	int failures = 0;
+	for( int fi = 0; fi < 2; ++fi )
+	{
+		const StatedFormat& f  = kStatedFormats[ fi ];
+		const model::Format& m = model::FormatOf( fi );
+		failures += report( m.syncTipHz == f.tipMHz * 1e6 && m.deviationHz == f.devMHz * 1e6 && std::fabs( m.PeakWhiteHz() - ( f.tipMHz + f.devMHz ) * 1e6 ) < 1e-6, false,
+		                    "%-6s FM: sync tip %.1f MHz, peak white %.1f MHz, deviation %.1f MHz", f.name, f.tipMHz, f.tipMHz + f.devMHz, f.devMHz );
+		failures += report( std::fabs( m.emphasisTau - f.tauUs * 1e-6 ) < 1e-15 && std::fabs( m.emphasisX - shelfX( f ) ) < 1e-6, false, "%-6s emphasis: tau %.2f us, shelf %.4f dB, corners %.0f and %.0f kHz", f.name, f.tauUs, f.xDb,
+		                    1e3 / ( 2.0 * kPi * f.tauUs ), 1e3 * shelfX( f ) / ( 2.0 * kPi * f.tauUs ) );
+		failures += report( m.rfHighPassHz == f.rfHighMHz * 1e6 && m.rfLowPassHz == f.rfLowMHz * 1e6 && m.yLowPassHz == f.yLowMHz * 1e6, false, "%-6s deck: RF band %.2f to %.2f MHz, Y low-pass %.1f MHz", f.name, f.rfHighMHz,
+		                    f.rfLowMHz, f.yLowMHz );
+	}
+	failures += report( model::PlaybackMode( model::kVideo8, model::kHi8 ) == model::kVideo8 && model::PlaybackMode( model::kHi8, model::kVideo8 ) == model::kVideo8 && model::PlaybackMode( model::kHi8, model::kHi8 ) == model::kHi8, false,
+	                    "a Video8 deck has one mode; a Hi8 deck plays each tape in its own" );
+	for( int si = 0; si < 2; ++si )
+	{
+		const StatedStandard& st  = kStatedStandards[ si ];
+		const model::Standard& ms = model::StandardOf( si );
+		const double active       = st.lineUs - st.front - st.sync - st.back;
+		failures += report( ms.LineSamples() == static_cast< int >( std::lround( st.lineUs * 40.5 ) ) && ms.frameLines == st.lines && std::fabs( ms.Active() - active ) < 1e-12, false,
+		                    "%s: %d samples a line at 40.5 MHz, %d lines, %.4f us active = %d pixels at 13.5 MHz", st.name, ms.LineSamples(), st.lines, active, ms.ActivePixels() );
+		failures += report( std::fabs( ms.syncVolts - st.S ) < 1e-12 && std::fabs( ms.whiteVolts - st.Wh ) < 1e-12, false, "%s: sync %.4f V below blanking, white %.4f V above", st.name, st.S, st.Wh );
+		failures += report( std::fabs( ms.colourUnderHz - st.underFh * st.fH ) < 1e-6, false, "%s: colour-under %.3f kHz = %.3f fH (the same for Hi8)", st.name, st.underFh * st.fH / 1e3, st.underFh );
+		const double v = kPi * 0.040 * st.fps;
+		failures += report( std::fabs( ms.WritingSpeed() - v ) < 1e-12, false, "%s: writing speed %.4f m/s (40 mm drum, %.3f turns a second)", st.name, v, st.fps );
+	}
+	failures += report( std::fabs( model::SpacingLossDb( 1e-7, 1e7, 3.0 ) - 54.575 * 1e-7 * 1e7 / 3.0 ) < 1e-3, false, "Wallace: %.3f dB per wavelength of spacing (20 log10 e^2 pi)", 20.0 / std::log( 10.0 ) * 2.0 * kPi );
+	//The noise: sigma^2 B / ( fs / 2 ) of white noise in the 5.1 MHz band
+	//against a carrier's 1/2.
+	for( double db : { 10.0, 28.0, 46.0 } )
+	{
+		const double sigma = model::NoiseSigma( db );
+		const double cnr   = 10.0 * std::log10( 0.5 / ( sigma * sigma * 5.1e6 / ( kFs / 2.0 ) ) );
+		failures += report( std::fabs( cnr - db ) < 1e-9, false, "noise sigma %.5f gives %.1f dB in the Video8 band", sigma, cnr );
+	}
+	failures += report( std::fabs( controls::CnrDb( 0.0f ) - 46.0 ) < 1e-12 && std::fabs( controls::CnrDb( 1.0f ) - 10.0 ) < 1e-12 && !controls::NoiseOn( 0.0f ), false, "Tape Noise: off at 0, then 46 dB down to 10 dB" );
+	return failures;
+}
+
+const Check kChecks[] = {
+	{ "--carrier", runCarrier, "the recorded FM at sync tip, blanking and white is the format's (counted)", model::kPerturbHi8AtVideo8Tip, "Hi8 written from Video8's sync tip", false },
+	{ "--matched", runMatched, "a deck playing its own format gives back a flat field's level", model::kPerturbRisingOnly, "the demodulator counts rising crossings only", true },
+	{ "--gain", runGain, "Hi8 on Video8 has the gain 2.0 / 1.2; a matched deck 1", model::kPerturbDeckDeviation, "the Video8 deck uses the tape's map", true },
+	{ "--emphasis", runEmphasis, "the mismatched emphasis leaves a tail with the deck's 1.3 us", model::kPerturbDeckEmphasis, "the Video8 deck de-emphasises with the tape's tau", true },
+	{ "--clamp", runClamp, "the black lifts by what the porch still holds of the sync", model::kPerturbDeckEmphasis, "the Video8 deck de-emphasises with the tape's tau", true },
+	{ "--threshold", runThreshold, "Hi8's white is noisier than its black by the band's |H| ratio", model::kPerturbWideBand, "the Video8 deck's band as wide as Hi8's", true },
+	{ "--streak", runStreak, "Hi8 on Video8 dips below black after a bright edge", model::kPerturbWideBand, "the Video8 deck's band as wide as Hi8's", true },
+	{ "--wallace", runWallace, "the head clog loses 54.6 d / lambda dB", model::kPerturbWrongSpeed, "the clog at the other standard's speed", false },
+	{ "--registration", runRegistration, "a matched deck puts an edge back where it was", model::kPerturbNoDelay, "the deck's delay left uncompensated", true },
+	{ "--intake", runIntake, "the host frame's area average onto the standard's raster, in Y'UV", 0, "", true },
+	{ "--display", runDisplay, "the host picture is the deck's, at the deck's raster and between its pixels at another", 0, "", true },
+	{ "--dropout", runDropout, "a dropout disturbs its own line, from its start", model::kPerturbDropoutLine, "the dropout two lines down", true },
+	{ "--threads", runThreads, "one worker and many give the same picture", model::kPerturbSeedByWorker, "the noise seeded by worker", true },
+	{ "--resize", runResize, "nothing is lost across a resize", model::kPerturbResizeResetsClock, "a resize restarts the clock", true },
+	{ "--alpha", runAlpha, "alpha 1 at Mix 1, the clip's at Mix 0", 0, "", true },
+};
+
+int runNegative( int W, int H )
+{
+	std::printf( "negative controls: each perturbation of the plugin's model must FAIL its check, %dx%d\n", W, H );
+	int failures = 0;
+	for( const Check& c : kChecks )
+	{
+		if( c.negativeBits == 0 || c.run == nullptr )
+			continue;
+		const int before = g_failures;
+		const int checks = g_checks;
+		const int failed = c.run( W, H, c.negativeBits, true );
+		g_failures       = before;
+		g_checks         = checks;
+		failures += report( failed > 0, false, "%-44s -> %s fails (%d of its checks)", c.negativeWhat, c.flag, failed );
+	}
+	return failures;
 }
 
 //---------------------------------------------------------------------------
@@ -1124,19 +2252,31 @@ int main( int argc, char** argv )
 
 	if( !checks.empty() )
 	{
-		bool needGL = false;
-		for( const std::string& check : checks )
+		auto requested = [ & ]( const std::string& flag ) {
+			return std::find( checks.begin(), checks.end(), flag ) != checks.end();
+		};
+		if( requested( "--names" ) )
 		{
-			if( check == "--names" || check == "--model" )
+			runNames();
+			std::printf( "\n" );
+		}
+		if( requested( "--model" ) )
+		{
+			runModel();
+			std::printf( "\n" );
+		}
+		bool needGL = requested( "--negative" );
+		for( const Check& c : kChecks )
+		{
+			if( !requested( c.flag ) )
+				continue;
+			if( c.gl )
 			{
-				if( check == "--names" )
-					runNames();
-				else
-					runModel();
-				std::printf( "\n" );
-			}
-			else
 				needGL = true;
+				continue;
+			}
+			c.run( width, height, perturb, false );
+			std::printf( "\n" );
 		}
 
 		if( needGL )
@@ -1152,18 +2292,16 @@ int main( int argc, char** argv )
 			}
 			else
 			{
-				for( const std::string& check : checks )
+				for( const Check& c : kChecks )
 				{
-					const Check* found = nullptr;
-					for( const Check& c : kChecks )
-						if( check == c.flag )
-							found = &c;
-					if( found != nullptr )
-						found->run( width, height, perturb, false );
-					else if( check == "--negative" )
-						runNegative( width, height );
-					else
+					if( !c.gl || !requested( c.flag ) )
 						continue;
+					c.run( width, height, perturb, false );
+					std::printf( "\n" );
+				}
+				if( requested( "--negative" ) )
+				{
+					runNegative( width, height );
 					std::printf( "\n" );
 				}
 				CGLSetCurrentContext( nullptr );
