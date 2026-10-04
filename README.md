@@ -24,6 +24,38 @@ A Hi8 tape played back on a Video8 deck, as an FFGL effect for
 <sub>One frame, rendered by `lbtest --pipe`, the offline harness — not captured from
 Resolume. Resolume's bundled demo clip Metalive at the defaults.</sub>
 
+<!-- downloads:start -->
+
+## Download
+
+**[v0.1.0](https://github.com/stoatworks-labs/lowband/releases/tag/v0.1.0)** — prebuilt for macOS and Windows. Pick your platform:
+
+<details>
+<summary><b>macOS</b> — Universal (Apple Silicon + Intel)</summary>
+
+| Build | Download | Size |
+| --- | --- | --- |
+| Universal (Apple Silicon + Intel) · .dmg disk image | [`lowband-0.1.0-macos-universal.dmg`](https://github.com/stoatworks-labs/lowband/releases/download/v0.1.0/lowband-0.1.0-macos-universal.dmg) | 259 KB |
+| Universal (Apple Silicon + Intel) · .zip archive | [`lowband-macos-universal.zip`](https://github.com/stoatworks-labs/lowband/releases/latest/download/lowband-macos-universal.zip) | 219 KB |
+
+</details>
+
+<details>
+<summary><b>Windows</b> — x64</summary>
+
+| Build | Download | Size |
+| --- | --- | --- |
+| x64 · .exe installer | [`lowband-0.1.0-windows-x86_64-setup.exe`](https://github.com/stoatworks-labs/lowband/releases/download/v0.1.0/lowband-0.1.0-windows-x86_64-setup.exe) | 236 KB |
+| x64 · .zip archive | [`lowband-windows-x86_64.zip`](https://github.com/stoatworks-labs/lowband/releases/latest/download/lowband-windows-x86_64.zip) | 132 KB |
+
+</details>
+
+All builds, checksums and release notes: [github.com/stoatworks-labs/lowband/releases](https://github.com/stoatworks-labs/lowband/releases).
+
+macOS builds are signed and notarised and open normally. The Windows builds are unsigned, so SmartScreen warns once.
+
+<!-- downloads:end -->
+
 ## The one idea
 
 Hi8 is Video8 with the luma's FM carrier moved up. Video8 records the picture as a
