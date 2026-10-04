@@ -51,15 +51,22 @@ jobs:
         timeout-minutes: 40
         run: |
           ./build/lbtest --names --model
-          ./build/lbtest --chroma     --size 320x180
-          ./build/lbtest --delay      --size 320x180
-          ./build/lbtest --switch     --size 320x180
-          ./build/lbtest --pal        --size 320x180
-          ./build/lbtest --doc        --size 320x180
-          ./build/lbtest --generation --size 320x180
-          ./build/lbtest --tracking   --size 320x180
-          ./build/lbtest --resize     --size 320x180
-          ./build/lbtest --negative   --size 320x180
+          ./build/lbtest --carrier       --size 320x180
+          ./build/lbtest --matched       --size 320x180
+          ./build/lbtest --gain          --size 320x180
+          ./build/lbtest --emphasis      --size 320x180
+          ./build/lbtest --clamp         --size 320x180
+          ./build/lbtest --threshold     --size 320x180
+          ./build/lbtest --streak        --size 320x180
+          ./build/lbtest --wallace       --size 320x180
+          ./build/lbtest --registration  --size 320x180
+          ./build/lbtest --intake        --size 320x180
+          ./build/lbtest --display       --size 320x180
+          ./build/lbtest --dropout       --size 320x180
+          ./build/lbtest --threads       --size 320x180
+          ./build/lbtest --resize        --size 320x180
+          ./build/lbtest --alpha         --size 320x180
+          ./build/lbtest --negative      --size 320x180
 
       - name: Controls
         # At 160x90 and two at a time, because the runner has no GPU and the
