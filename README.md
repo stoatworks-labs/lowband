@@ -68,6 +68,16 @@ against.
 <sub>Rendered by `lbtest --pipe` at the defaults, changing only Recording and Deck: Video8 on
 Video8, Hi8 on Hi8, Hi8 on Video8.</sub>
 
+[![Lowband — a Hi8 tape on a Video8 deck, modelled, for Resolume](docs/video-thumb.png)](https://www.youtube.com/watch?v=fpdHTg4QvBk)
+
+*[Watch it](https://www.youtube.com/watch?v=fpdHTg4QvBk) — 83 seconds: the defaults, the
+clip against both references, the mismatch alone with its glow and lifted black, the black
+streaks after the lit pillars, the highlights breaking up under tape noise while a Video8
+tape only grains, the head clog, the sync AGC and dropouts. Every frame is the real plugin's
+output: an FFGL plugin has no window, so the footage is rendered by this repository's own
+offline harness (`lbtest --pipe`, driven by a cue sheet), not captured from Resolume. The
+clips are Resolume's bundled demo media.*
+
 ### How it differs from Colourunder, Ferric and Old Cathode
 
 [Colourunder](https://github.com/stoatworks-labs/colourunder) is VHS's colour-under chroma,
