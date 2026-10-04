@@ -273,7 +273,10 @@ Windows  %LOCALAPPDATA%\lowband\logs\lowband.YYYY-MM-DD.log
   offline against the real plugin class in a headless CGL context, plus an `oxbow` load.
 - **Never seen on camera footage**, only on Resolume's bundled CG loops.
 - **Only ever run on an Apple M4 Max**, although the macOS build contains an Intel slice.
-- **No presets and no OpenFX version.**
+- **No presets and no OpenFX version.** There is a
+  [browser demo](https://lowband-demo.stoatworks-labs.com/), but it runs a JavaScript port of the
+  engine. A script in the repository checks the port against the plugin's own C++ code, but on the
+  page you are trusting it, and it runs behind a playing clip. Treat it as a preview, not the plugin.
 
 ---
 
