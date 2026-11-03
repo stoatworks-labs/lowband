@@ -8,16 +8,45 @@
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./vendor/kit.css" />
     <link rel="canonical" href="https://lowband-demo.stoatworks-labs.com/" />
+    <meta name="project-page" content="https://stoatworks-labs.com/software/lowband/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Stoatworks Labs" />
+    <meta property="og:title" content="Lowband — browser demo | Stoatworks Labs" />
+    <meta property="og:description" content="Try the Lowband FFGL plugin for Resolume in your browser: a Hi8 tape played back on a Video8 deck, with the luma as a real FM signal — 5/3 too much contrast, a glow trailing every highlight, a lifted black, black streaks after bright edges, and highlights that break up first under tape noise. The plugin's own shaders ported to WebGL2, around a JavaScript port of its CPU engine." />
+    <meta property="og:url" content="https://lowband-demo.stoatworks-labs.com/" />
+    <meta property="og:image" content="https://stoatworks-labs.com/thumbs/lowband.png" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="720" />
+    <meta property="og:image:alt" content="Lowband" />
+    <meta name="twitter:card" content="summary_large_image" />
   </head>
   <body>
     <main id="demo">
       <noscript>
+        <h1>Lowband</h1>
+        <p>
+          An FFGL effect that plays your clip as a Hi8 tape on a Video8 deck.
+          The luma is an actual FM carrier: written by Hi8 at 5.7 to 7.7 MHz
+          with a 0.47 µs pre-emphasis, read by a Video8 deck's channel, limiter
+          and pulse-count demodulator built for 4.2 to 5.4 MHz and a 1.3 µs
+          de-emphasis. None of it is painted on. The contrast comes out 5/3 too
+          high, a glow trails every highlight, the back-porch clamp lifts the
+          black, bright edges throw black streaks where their overshoot leaves
+          the deck's band, and under tape noise the highlights break into
+          sparkle first. The colour-under chroma is the same in both formats, so
+          the colour survives, and a Video8 tape, or a Hi8 deck, plays clean.
+        </p>
         <p>
           This demo runs the plugin's shaders in your browser and a port of its
           engine in Web Workers, so it needs JavaScript and WebGL2. The plugin
           itself, its source and its downloads are on
           <a href="https://github.com/stoatworks-labs/lowband">its repository</a>.
         </p>
+        <ul>
+          <li><a href="https://stoatworks-labs.com/software/lowband/">Project page and downloads</a></li>
+          <li><a href="https://stoatworks-labs.com/software/lowband/guide/">User guide</a></li>
+          <li><a href="https://github.com/stoatworks-labs/lowband">Source on GitHub</a></li>
+        </ul>
       </noscript>
     </main>
 
